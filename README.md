@@ -23,20 +23,117 @@ Please contact the maintainers for any questions or concerns.
 
 Issues and feature requests are welcome.
 
-# Installation instructions
-JaxPP dependencies and supported JAX versions are listed in [`pyproject.toml`](https://github.com/NVIDIA/jaxpp/-/blob/main/pyproject.toml).
 
+
+
+# Installation on ROCm-7.x
+
+JaxPP dependencies and supported JAX versions are listed in [`pyproject.toml`](https://github.com/ROCm/jaxpp/-/blob/main/pyproject.toml).
+
+## Installation of cupy
+``` bash
+git clone --recursive https://github.com/cupy/cupy.git
+cd cupy
+export HCC_AMDGPU_TARGET=gfx942  # This value should be changed based on your GPU
+export __HIP_PLATFORM_HCC__
+export CUPY_INSTALL_USE_HIP=1
+export ROCM_HOME=/opt/rocm
+export HIP_PATH=/opt/rocm
+export HIPCC=/opt/rocm/bin/hipcc
+export PATH=/opt/rocm/bin:$PATH
+export LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH}
+
+pip install -v .
+```
+## Installation of JaxPP
 ```bash
-git clone https://github.com/NVIDIA/jaxpp.git
+git clone -b cj_rocm_jaxpp_dev https**://github.com/ROCm/jaxpp.git
 cd jaxpp
 pip install -e .
 ```
 
-You can verify the setup with [`examples/basic.py`](examples/basic.py) on a single-node.
+# Verification
+You can verify the setup with [`examples/pp_vs_no_pp_gpt2_pp_tp_dp.py`](examples/pp_vs_no_pp_gpt2_pp_tp_dp.py) on a single-node with 8 GPUs.
 
+## running with SPMD
 ```bash
-python examples/basic.py
+python3 pp_vs_no_pp_gpt2_pp_tp_dp.py --mode=base --pp=1 --dp=1 --tp=1
 ```
+
+```
+(Config: PP=1, DP=1, TP=1, total_devices=1, train_steps=40
+=== Running baseline (SPMD data parallel, no PP) ===
+[baseline warmup] loss_sum=10.872209
+[baseline 0005/0040] loss_sum=9.235132
+[baseline 0010/0040] loss_sum=7.451328
+2025-11-28 10:12:47.257395: starting profile (baseline)
+2025-11-28 10:12:47.535898: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1764324767.560890   25327 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1764324767.566679   25327 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1764324767.605893   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764324767.605918   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764324767.605921   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764324767.605923   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+[baseline 0015/0040] loss_sum=5.805967
+[baseline 0020/0040] loss_sum=4.174860
+2025-11-28 10:12:52.945652: blocking (baseline)
+2025-11-28 10:12:52.949731: stopping profile (baseline)
+[baseline 0025/0040] loss_sum=2.573964
+[baseline 0030/0040] loss_sum=1.272751
+[baseline 0035/0040] loss_sum=0.483864
+[baseline 0040/0040] loss_sum=0.164586
+[baseline] avg step time per step after profiling (steps 20..39): 276.524 ms)
+```
+
+
+##  running with PP, TP, DP
+```bash
+python3 pp_vs_no_pp_gpt2_pp_tp_dp.py --mode=pp --pp=2 --dp=1 --tp=4
+```
+
+```
+Config: PP=2, DP=1, TP=4, total_devices=8, train_steps=40
+=== Running pipeline-parallel (PP+DP+TP MPMD) ===
+/pyenv/versions/3.12.10/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1185: UserWarning: Some donated buffers were not usable: ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]).
+See an explanation at https://docs.jax.dev/en/latest/faq.html#buffer-donation.
+  warnings.warn("Some donated buffers were not usable:"
+/pyenv/versions/3.12.10/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1185: UserWarning: Some donated buffers were not usable: ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(int32[32,1024,1]).
+See an explanation at https://docs.jax.dev/en/latest/faq.html#buffer-donation.
+  warnings.warn("Some donated buffers were not usable:"
+[pp warmup] loss_sum=10.873143
+[pp 0005/0040] loss_sum=10.113508
+[pp 0010/0040] loss_sum=9.279942
+2025-11-28 10:14:24.503259: starting profile (PP)
+2025-11-28 10:14:24.736599: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1764324864.745910   26108 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1764324864.748844   26108 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1764324864.757302   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764324864.757315   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764324864.757318   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764324864.757320   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+[pp 0015/0040] loss_sum=7.984598
+[pp 0020/0040] loss_sum=6.623155
+2025-11-28 10:14:30.072466: blocking (PP)
+2025-11-28 10:14:30.072779: stopping profile (PP)
+[pp 0025/0040] loss_sum=5.287926
+[pp 0030/0040] loss_sum=3.671954
+[pp 0035/0040] loss_sum=2.230067
+[pp 0040/0040] loss_sum=1.051485
+[pp] avg step time per step after profiling (steps 20..39): 156.535 ms
+```
+The above loss comes down slower than that from SPMD at the moment.  
 
 # Example
 
@@ -108,33 +205,9 @@ print(mpmd_mesh.lowering_mesh().shape) # OrderedDict([('mpmd', 1), ('data', 1), 
 
 # Building and Testing Docker Container
 
-JaxPP provides Docker containers for development and testing. The build process consists of two stages: building a base image and then building the main image.
+JaxPP provides Docker containers for development and testing. Currently it works on `rocm/jax-training:maxtext-v25.9`.
 
-## Prerequisites
-- Docker installed and configured
-- NVIDIA Container Toolkit installed
 
-## Building the Base Image
-
-The base image contains all the core dependencies and is built using CUDA 12.8:
-
-```bash
-docker build --force-rm=true \
-  -f scripts/docker/Dockerfile.base \
-  --build-arg CUDA_BASE_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu24.04 \
-  -t jaxpp-base .
-```
-
-## Building the Main Image
-
-After building the base image, you can build the main image:
-
-```bash
-docker build --force-rm=true \
-  -f scripts/docker/Dockerfile \
-  --build-arg BASE_IMAGE=jaxpp-base \
-  -t jaxpp .
-```
 
 ## Running Tests
 
