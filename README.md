@@ -53,85 +53,83 @@ pip install -e .
 ```
 
 # Verification
-You can verify the setup with [`examples/pp_vs_no_pp_gpt2_pp_tp_dp.py`](examples/pp_vs_no_pp_gpt2_pp_tp_dp.py) on a single-node with 8 GPUs.
+You can verify the setup with [`examples/tiny_gpt2_jaxpp_vs_spmd_dp.py`](examples/tiny_gpt2_jaxpp_vs_spmd_dp.py) on a single-node with 8 GPUs.
 
 ## running with SPMD
 ```bash
-python3 pp_vs_no_pp_gpt2_pp_tp_dp.py --mode=base --pp=1 --dp=1 --tp=1
+python tiny_gpt2_jaxpp_vs_spmd_dp.py   --system=spmd_dp   --global-batch=32
 ```
 
 ```
-(Config: PP=1, DP=1, TP=1, total_devices=1, train_steps=40
-=== Running baseline (SPMD data parallel, no PP) ===
-[baseline warmup] loss_sum=10.872209
-[baseline 0005/0040] loss_sum=9.235132
-[baseline 0010/0040] loss_sum=7.451328
-2025-11-28 10:12:47.257395: starting profile (baseline)
-2025-11-28 10:12:47.535898: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+=== SPMD data-parallel (pmap) on 8 GPUs ===
+[spmd_dp warmup] loss_sum=10.875758
+[spmd_dp 0005/0040] loss_sum=9.484707
+[spmd_dp 0010/0040] loss_sum=8.662130
+2025-11-28 18:01:56.174501: start profile (spmd_dp)
+2025-11-28 18:01:56.411744: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-E0000 00:00:1764324767.560890   25327 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
-E0000 00:00:1764324767.566679   25327 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
-W0000 00:00:1764324767.605893   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1764324767.605918   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1764324767.605921   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1764324767.605923   25327 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+E0000 00:00:1764352916.424626   55703 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1764352916.428393   55703 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1764352916.438128   55703 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764352916.438145   55703 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764352916.438147   55703 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764352916.438149   55703 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
-[baseline 0015/0040] loss_sum=5.805967
-[baseline 0020/0040] loss_sum=4.174860
-2025-11-28 10:12:52.945652: blocking (baseline)
-2025-11-28 10:12:52.949731: stopping profile (baseline)
-[baseline 0025/0040] loss_sum=2.573964
-[baseline 0030/0040] loss_sum=1.272751
-[baseline 0035/0040] loss_sum=0.483864
-[baseline 0040/0040] loss_sum=0.164586
-[baseline] avg step time per step after profiling (steps 20..39): 276.524 ms)
+2025-11-28 18:01:58.486192: E external/xla/xla/backends/profiler/gpu/rocm_profiler_sdk.cc:176] HIP op OOB: kind 0 op = 0 vec.size() = 0
+2025-11-28 18:01:58.969439: E external/xla/xla/backends/profiler/gpu/rocm_profiler_sdk.cc:184] HIP kind OOB: kind = 407136460 name_info_.size() = 22
+[spmd_dp 0015/0040] loss_sum=7.907586
+[spmd_dp 0020/0040] loss_sum=7.070846
+2025-11-28 18:02:01.525778: stop profile (spmd_dp)
+[spmd_dp 0025/0040] loss_sum=6.699824
+[spmd_dp 0030/0040] loss_sum=5.703546
+[spmd_dp 0035/0040] loss_sum=5.018611
+[spmd_dp 0040/0040] loss_sum=3.436389
+[spmd_dp] avg step time per step after profiling (steps 20..39): 273.633 ms
 ```
 
 
 ##  running with PP, TP, DP
 ```bash
-python3 pp_vs_no_pp_gpt2_pp_tp_dp.py --mode=pp --pp=2 --dp=1 --tp=4
+python tiny_gpt2_jaxpp_vs_spmd_dp.py   --system=jaxpp   --pp=2 --dp=1 --tp=4   --global-batch=32
 ```
 
 ```
-Config: PP=2, DP=1, TP=4, total_devices=8, train_steps=40
-=== Running pipeline-parallel (PP+DP+TP MPMD) ===
+=== JaxPP MPMD pipeline ===
 /pyenv/versions/3.12.10/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1185: UserWarning: Some donated buffers were not usable: ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]).
 See an explanation at https://docs.jax.dev/en/latest/faq.html#buffer-donation.
   warnings.warn("Some donated buffers were not usable:"
 /pyenv/versions/3.12.10/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1185: UserWarning: Some donated buffers were not usable: ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,2048]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[32,8,1024,1024]), ShapedArray(float32[32,8,1024,1]), ShapedArray(float32[]), ShapedArray(float32[32,8,1024,64]), ShapedArray(float32[32,8,64,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[1,1,512]), ShapedArray(float32[32,1024,1]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024]), ShapedArray(float32[32,1024,512]), ShapedArray(int32[32,1024,1]).
 See an explanation at https://docs.jax.dev/en/latest/faq.html#buffer-donation.
   warnings.warn("Some donated buffers were not usable:"
-[pp warmup] loss_sum=10.873143
-[pp 0005/0040] loss_sum=10.113508
-[pp 0010/0040] loss_sum=9.279942
-2025-11-28 10:14:24.503259: starting profile (PP)
-2025-11-28 10:14:24.736599: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+[jaxpp warmup] loss_sum=10.874979
+[jaxpp 0005/0040] loss_sum=10.056481
+[jaxpp 0010/0040] loss_sum=9.014668
+2025-11-28 18:00:19.886230: start profile (jaxpp)
+2025-11-28 18:00:20.137458: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-E0000 00:00:1764324864.745910   26108 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
-E0000 00:00:1764324864.748844   26108 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
-W0000 00:00:1764324864.757302   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1764324864.757315   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1764324864.757318   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1764324864.757320   26108 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+E0000 00:00:1764352820.146015   54808 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1764352820.148472   54808 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1764352820.155795   54808 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764352820.155806   54808 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764352820.155809   54808 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1764352820.155810   54808 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
 AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
-[pp 0015/0040] loss_sum=7.984598
-[pp 0020/0040] loss_sum=6.623155
-2025-11-28 10:14:30.072466: blocking (PP)
-2025-11-28 10:14:30.072779: stopping profile (PP)
-[pp 0025/0040] loss_sum=5.287926
-[pp 0030/0040] loss_sum=3.671954
-[pp 0035/0040] loss_sum=2.230067
-[pp 0040/0040] loss_sum=1.051485
-[pp] avg step time per step after profiling (steps 20..39): 156.535 ms
+[jaxpp 0015/0040] loss_sum=7.597356
+[jaxpp 0020/0040] loss_sum=6.089570
+2025-11-28 18:00:25.371075: stop profile (jaxpp)
+[jaxpp 0025/0040] loss_sum=4.620077
+[jaxpp 0030/0040] loss_sum=3.188601
+[jaxpp 0035/0040] loss_sum=1.805840
+[jaxpp 0040/0040] loss_sum=0.780893
+[jaxpp] avg step time per step after profiling (steps 20..39): 155.923 ms
 ```
 The above loss comes down slower than that from SPMD at the moment.  
 
