@@ -47,7 +47,7 @@ pip install -v .
 ```
 ## Installation of JaxPP
 ```bash
-git clone -b cj_rocm_jaxpp_dev https**://github.com/ROCm/jaxpp.git
+git clone git@github.com:ROCm/jaxpp.git
 cd jaxpp
 pip install -e .
 ```
