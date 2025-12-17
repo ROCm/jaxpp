@@ -23,19 +23,90 @@ Please contact the maintainers for any questions or concerns.
 
 Issues and feature requests are welcome.
 
-# Installation instructions
-JaxPP dependencies and supported JAX versions are listed in [`pyproject.toml`](https://github.com/NVIDIA/jaxpp/-/blob/main/pyproject.toml).
 
-```bash
-git clone https://github.com/NVIDIA/jaxpp.git
-cd jaxpp
-pip install -e .
+
+
+# Installation on ROCm-7.x
+
+JaxPP dependencies are listed in [`pyproject.toml`](https://github.com/ROCm/jaxpp/-/blob/main/pyproject.toml), and we current support JAX-0.7.1 and 0.8.0.
+
+## Installation of JAX-0.7.1
+
+```
+https://github.com/ROCm/rocm-jax/tree/rocm-jaxlib-v0.7.1
 ```
 
-You can verify the setup with [`examples/basic.py`](examples/basic.py) on a single-node.
+## Installation of cupy
+``` bash
+git clone --recursive https://github.com/cupy/cupy.git
+cd cupy
+export HCC_AMDGPU_TARGET=gfx942  # This value should be changed based on your GPU
+export __HIP_PLATFORM_HCC__
+export CUPY_INSTALL_USE_HIP=1
+export ROCM_HOME=/opt/rocm
+export HIP_PATH=/opt/rocm
+export HIPCC=/opt/rocm/bin/hipcc
+export PATH=/opt/rocm/bin:$PATH
+export LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH}
 
+pip install -v .
+```
+## Installation of JaxPP
 ```bash
-python examples/basic.py
+git clone git@github.com:ROCm/jaxpp.git
+cd jaxpp
+pip install --no-deps .
+```
+
+# Verification
+You can verify the setup with [`examples/tiny_gpt2_jaxpp_vs_spmd_dp.py`](examples/tiny_gpt2_jaxpp_vs_spmd_dp.py) on a single-node with 8 GPUs.
+
+## running with SPMD
+```bash
+python examples/tiny_gpt2_jaxpp_vs_spmd_dp.py   --system=spmd_dp   --global-batch=32
+```
+
+```
+=== SPMD data-parallel (pmap) on 8 GPUs ===
+[spmd_dp warmup] loss_sum=10.875779
+[spmd_dp 0005/0040] loss_sum=9.484621
+[spmd_dp 0010/0040] loss_sum=8.665697
+2026-01-11 17:40:07.490737: start profile (spmd_dp)
+2026-01-11 17:40:07.491327: E external/xla/xla/python/profiler/internal/python_hooks.cc:416] Can't import tensorflow.python.profiler.trace
+[spmd_dp 0015/0040] loss_sum=7.860461
+[spmd_dp 0020/0040] loss_sum=7.160092
+2026-01-11 17:40:26.985328: stop profile (spmd_dp)
+2026-01-11 17:40:26.985854: E external/xla/xla/python/profiler/internal/python_hooks.cc:416] Can't import tensorflow.python.profiler.trace
+[spmd_dp 0025/0040] loss_sum=6.619992
+[spmd_dp 0030/0040] loss_sum=5.782149
+[spmd_dp 0035/0040] loss_sum=4.831417
+[spmd_dp 0040/0040] loss_sum=3.508849
+[spmd_dp] avg step time per step after profiling (steps 20..39): 1783.959 ms
+```
+
+
+##  running with JAXPP MPMD, TP, DP
+```bash
+python examples/tiny_gpt2_jaxpp_vs_spmd_dp.py   --system=jaxpp   --pp=2 --dp=1 --tp=4   --global-batch=32
+```
+
+```
+=== JaxPP MPMD pipeline ===
+... ...
+[jaxpp warmup] loss_sum=10.874269
+[jaxpp 0005/0040] loss_sum=10.056883
+[jaxpp 0010/0040] loss_sum=9.022059
+2026-01-11 17:45:41.355780: start profile (jaxpp)
+2026-01-11 17:45:41.356591: E external/xla/xla/python/profiler/internal/python_hooks.cc:416] Can't import tensorflow.python.profiler.trace
+[jaxpp 0015/0040] loss_sum=7.602057
+[jaxpp 0020/0040] loss_sum=6.092763
+2026-01-11 17:45:45.510771: stop profile (jaxpp)
+2026-01-11 17:45:45.511169: E external/xla/xla/python/profiler/internal/python_hooks.cc:416] Can't import tensorflow.python.profiler.trace
+[jaxpp 0025/0040] loss_sum=4.633161
+[jaxpp 0030/0040] loss_sum=3.209099
+[jaxpp 0035/0040] loss_sum=1.882708
+[jaxpp 0040/0040] loss_sum=0.803130
+[jaxpp] avg step time per step after profiling (steps 20..39): 353.541 ms
 ```
 
 # Example
@@ -108,54 +179,19 @@ print(mpmd_mesh.lowering_mesh().shape) # OrderedDict([('mpmd', 1), ('data', 1), 
 
 # Building and Testing Docker Container
 
-JaxPP provides Docker containers for development and testing. The build process consists of two stages: building a base image and then building the main image.
+JaxPP provides Docker containers for development and testing. Currently it works on `rocm/jax-training:maxtext-v25.9`.
 
-## Prerequisites
-- Docker installed and configured
-- NVIDIA Container Toolkit installed
 
-## Building the Base Image
-
-The base image contains all the core dependencies and is built using CUDA 12.8:
-
-```bash
-docker build --force-rm=true \
-  -f scripts/docker/Dockerfile.base \
-  --build-arg CUDA_BASE_IMAGE=nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu24.04 \
-  -t jaxpp-base .
-```
-
-## Building the Main Image
-
-After building the base image, you can build the main image:
-
-```bash
-docker build --force-rm=true \
-  -f scripts/docker/Dockerfile \
-  --build-arg BASE_IMAGE=jaxpp-base \
-  -t jaxpp .
-```
 
 ## Running Tests
 
-The container includes several test suites that can be run:
-
-1. **Unit Tests**:
+**Unit Tests**:
 ```bash
-docker run --gpus=all --shm-size=10.24gb --ulimit memlock=-1 --ulimit stack=67108864 \
-  -e XLA_FLAGS='--xla_gpu_graph_level=0' --rm --workdir=/workdir/jaxpp jaxpp \
-  "python /workdir/jaxpp/examples/basic.py --dtype=float32 && \
-   python /workdir/jaxpp/examples/basic.py --dtype=float16"
+pytest tests
 ```
 
-2. **PyTest Suite**:
-```bash
-docker run --gpus=all --shm-size=10.24gb --ulimit memlock=-1 --ulimit stack=67108864 \
-  -e XLA_PYTHON_CLIENT_ALLOCATOR=platform \
-  --rm --workdir=/workdir/jaxpp jaxpp "nvidia-smi && make install && pytest"
-```
 
-Note: The tests require GPU access and sufficient GPU memory.
+Note: The tests require 8 GPUs with sufficient GPU memory.
 
 
 # Multi-node setup

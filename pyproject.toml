@@ -1,3 +1,5 @@
+# # This file was modified for portability to AMDGPU
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -99,9 +101,9 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "jax[cuda12]>=0.5.1,<=0.6.2",
-    "cupy-cuda12x",
     "portpicker==1.6.0",
+    "flax",
+    "optax",
 ]
 
 [project.optional-dependencies]

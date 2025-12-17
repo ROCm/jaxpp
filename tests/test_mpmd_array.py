@@ -2,7 +2,7 @@ import os
 import unittest
 
 os.environ["JAX_PLATFORMS"] = "cpu"
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=6"
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +12,7 @@ from jaxpp.api import MpmdArray, MpmdMesh
 
 class TestMpmdArray(unittest.TestCase):
     def setUp(self):
-        assert jax.device_count() == 6
+        assert jax.device_count() == 8
 
         self.mesh = jax.make_mesh((3, 2), ("stage", "model"))
         self.mpmd_mesh = MpmdMesh(self.mesh, "stage")
