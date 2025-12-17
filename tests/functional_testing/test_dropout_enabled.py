@@ -24,8 +24,7 @@ import pytest
 from flax import linen as nn
 from flax.training.train_state import TrainState
 from jax import numpy as jnp
-from jax._src import xla_bridge as xb
-from jax._src.lib import cuda_versions
+from jax.lib import xla_bridge
 
 import jaxpp
 import jaxpp.api
@@ -93,9 +92,10 @@ class DropoutEnabledModel(nn.Module):
 class FlaxModelExecutionTest(unittest.TestCase):
     def setUp(self):
         """Set up a basic environment before each test with 8 GPU devices."""
-        xb.get_backend.cache_clear()
+        xla_bridge.get_backend.cache_clear()
+        gpu_devices = jax.devices('gpu')
 
-        if cuda_versions.cuda_device_count() < 1:
+        if len(gpu_devices) < 1:
             # Skip the test if no GPU are available
             pytest.skip()
 

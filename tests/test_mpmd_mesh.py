@@ -24,32 +24,32 @@ from jaxpp.mesh import MpmdMesh
 target_config = """
 gpu_device_info {
   threads_per_block_limit: 1024
-  threads_per_warp: 32
-  shared_memory_per_block: 49152
-  shared_memory_per_core: 233472
+  threads_per_warp: 64
+  shared_memory_per_block: 65536
+  shared_memory_per_core: 65536
   threads_per_core_limit: 2048
-  core_count: 132
+  core_count: 304
   fpus_per_core: 128
   block_dim_limit_x: 2147483647
-  block_dim_limit_y: 65535
-  block_dim_limit_z: 65535
-  memory_bandwidth: 3352320000000
-  l2_cache_size: 52428800
-  clock_rate_ghz: 1.98
-  device_memory_size: 84942979072
-  shared_memory_per_block_optin: 232448
-  cuda_compute_capability {
-    major: 9
+  block_dim_limit_y: 2147483647
+  block_dim_limit_z: 2147483647
+  memory_bandwidth: 5300000000000
+  l2_cache_size: 268435456
+  clock_rate_ghz: 2.1
+  device_memory_size: 206158430208
+  shared_memory_per_block_optin: 65536
+  rocm_compute_capability {
+    gcn_arch_name: "gfx942"
   }
   registers_per_core_limit: 65536
   registers_per_block_limit: 65536
 }
-platform_name: "CUDA"
+platform_name: "ROCM"
 dnn_version_info {
   major: 9
   minor: 6
 }
-device_description_str: "NVIDIA H100 80GB HBM3"
+device_description_str: "AMD MI300X"
 """
 
 
@@ -58,7 +58,7 @@ class TestMpmdMesh(unittest.TestCase):
         """Reset and Set up the logger instance before each test."""
         topo = topologies.get_topology_desc(
             "topo",
-            "cuda",
+            "rocm",
             target_config=target_config,
             topology="4x4x1",
         )
