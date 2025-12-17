@@ -24,7 +24,7 @@ import pytest
 from flax import linen as nn
 from flax.training import train_state
 from jax import numpy as jnp
-from jax.lib import xla_bridge
+from jax._src import xla_bridge as xb
 
 import jaxpp
 import jaxpp.api
@@ -78,8 +78,7 @@ class ModelWithPassthrough(nn.Module):
 class FlaxModelWithPassthroughExecutionTest(unittest.TestCase):
     def setUp(self):
         """Set up a basic environment before each test with 8 GPU devices."""
-        xla_bridge.get_backend.cache_clear()
-        gpu_devices = jax.devices('gpu')
+        xb.get_backend.cache_clear()
 
         if len(gpu_devices) < 1:
             # Skip the test if no GPU are available
