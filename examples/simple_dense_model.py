@@ -17,13 +17,13 @@ from jax.lax import with_sharding_constraint
 
 def init_distributed():
   parser = argparse.ArgumentParser()
-  parser.add_argument("--jax_distributed_initialize", action="store_true")
+  parser.add_argument("--jax_distributed", action="store_true")
   parser.add_argument("--process_count", type=int, default=1)
   parser.add_argument("--process_index", type=int, default=0)
   parser.add_argument("--coordination_service", type=str, default="")
   args, _ = parser.parse_known_args()
 
-  if args.jax_distributed_initialize:
+  if args.jax_distributed:
     dist.initialize(
       coordinator_address=args.coordination_service or "localhost:1234",
       num_processes=args.process_count,
@@ -74,8 +74,9 @@ def main():
   LR=1e-3           # learning rate
   N_STEPS=400
   usePP=True
+  jaxDistributed=True
   
-  rank, world = init_distributed()
+  rank, world = init_distributed() if jaxDistributed else (0, 2)
   # pipeline parallelism - MPMD jaxpp
   # data parallelism - shard input data over GPUs
   # tensor parallelism - shard model weights over GPUs

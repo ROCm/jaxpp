@@ -117,7 +117,7 @@ export XLA_FLAGS="--xla_gpu_enable_cublaslt=true \
 NumProcs=2
 TotalGpus=2
 TEST=simple_dense_model.py
-pkill -9 -c -f simple_dense_model
+pkill -9 -c -f python
 rm -f $XLA_DIR/zzout_*.log
 
 for ((pid = 0; pid < $NumProcs; pid++ )); do
@@ -128,11 +128,11 @@ for ((pid = 0; pid < $NumProcs; pid++ )); do
   if [[ pid -eq last_id ]]; then
     NODE_RANK=$pid \
     HIP_VISIBLE_DEVICES=$gpus \
-    $GDB $ROCPROF $PYEXEC $TEST --jax_distributed_initialize --process_count=$NumProcs --process_index=$pid 2>&1 | tee $XLA_DIR/zzzrun.log &
+    $GDB $ROCPROF $PYEXEC $TEST --jax_distributed --process_count=$NumProcs --process_index=$pid 2>&1 | tee $XLA_DIR/zzzrun.log &
   else
     NODE_RANK=$pid \
     HIP_VISIBLE_DEVICES=$gpus \
-    $PYEXEC $TEST --jax_distributed_initialize --process_count=$NumProcs --process_index=$pid 2>&1 | tee $XLA_DIR/zzout_$pid.log &
+    $PYEXEC $TEST --jax_distributed --process_count=$NumProcs --process_index=$pid 2>&1 | tee $XLA_DIR/zzout_$pid.log &
   fi
 done
 
