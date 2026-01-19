@@ -54,6 +54,8 @@ class MLP(nn.Module):
     self.layers = [
         self.XDense(self.hidden1, -0.5, 0.5),
         self.XDense(self.hidden2, -0.1, 0.1),
+        self.XDense(self.hidden2, -0.1, 0.1),
+        self.XDense(self.hidden2, -0.1, 0.1),
         self.XDense(self.out_dim, -1, 1),
      ]
     

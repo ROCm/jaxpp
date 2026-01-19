@@ -189,7 +189,8 @@ def main(args, process_id=None):
     jaxpp_opt_state, jaxpp_params, jaxpp_loss, jaxpp_preds = jaxpp_train_step_fn(
         opt_state_jaxpp, params_jaxpp, batch=hidden_states
     )
-    print(f"Done first step JAXPP, loss: {np.array(jaxpp_loss)}")
+    if jaxpp_loss.is_partially_addressable:
+        print(f"Done first step JAXPP, loss: {np.array(jaxpp_loss.to_mpmd_local_array)}")
 
     jax_opt_state, jax_params, jax_loss, jax_preds = jitted_train_step_fn(
         opt_state, params, hidden_states
@@ -203,6 +204,8 @@ def main(args, process_id=None):
     rtol = atol = 1e-3 if args.dtype == jnp.float32 else 1e-2
 
     def is_close(a, b):
+        if a is None or b is None: 
+            return True # arrays are not partially addressable
         return np.isclose(a, b, rtol=rtol, atol=atol).all()
 
     with assert_context("OPT State"):
@@ -263,10 +266,11 @@ def main(args, process_id=None):
         )
 
         if step == 0 or (step + 1) % 10 == 0:
+            jpp_loss = jaxpp_loss.to_mpmd_local_array.sum() if jaxpp_loss.is_partially_addressable else 0
             print(
                 f"\n[{step + 1:04}/{args.train_steps:04}]:"
                 f"\n\t- JAX Loss:   {np.array(jax_loss).sum()}"
-                f"\n\t- JAXPP Loss: {jaxpp_loss.to_mpmd_local_array.sum()}"
+                f"\n\t- JAXPP Loss: {jpp_loss}"
             )
 
         # Adapting the tolerance is necessary due to small differences
