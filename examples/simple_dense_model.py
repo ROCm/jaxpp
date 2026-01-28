@@ -52,11 +52,11 @@ class MLP(nn.Module):
     
   def setup(self):
     self.layers = [
-        self.XDense(self.hidden1, -0.5, 0.5),
-        self.XDense(self.hidden2, -0.1, 0.1),
-        self.XDense(self.hidden2, -0.1, 0.1),
-        self.XDense(self.hidden2, -0.1, 0.1),
-        self.XDense(self.out_dim, -1, 1),
+        self.XDense(770, -0.5, 0.5),
+        self.XDense(660, -0.1, 0.1),
+        self.XDense(550, -0.1, 0.1),
+        self.XDense(440, -0.1, 0.1),
+        self.XDense(330, -1, 1),
      ]
     
   def __call__(self, x):
@@ -72,6 +72,13 @@ class MLP(nn.Module):
 def main():
   BATCH_SIZE=2048
   FEAT_SIZE=16
+  # 4 ubatches
+  #def_mpmd_idx 0 -> 1 shape (512, 770) --------
+  #def_mpmd_idx 0 -> 1 shape (512, 770) --------
+  # 16 ubatches
+  #def_mpmd_idx 0 -> 1 shape (128, 770) --------
+  #def_mpmd_idx 0 -> 1 shape (128, 770) --------
+  
   N_UBATCHES=4      # number of microbatches
   LR=1e-3           # learning rate
   N_STEPS=400

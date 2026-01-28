@@ -91,6 +91,8 @@ PYEXEC=$(which python)
 # --xla_gpu_enable_command_buffer=cudnn,cublas,fusion,cublaslt,custom_call,collectives  \
 #HIPLIB=/tf/clr/build/hipamd/lib/libamdhip64.so
 
+export MORI_SHMEM_HEAP_SIZE=16G
+
 #export LD_PRELOAD=/opt/rocm/lib/libMIOpen.so.1:$HIPLIB:/tf/rccl/build/librccl.so
 export XLA_FLAGS="--xla_gpu_enable_cublaslt=true \
            --xla_gpu_enable_latency_hiding_scheduler=false \
