@@ -195,6 +195,112 @@ def transfer_impl(*args, src_mpmd_idx, tgt_mpmd_idx, src_shardings):
     return res
 
 
+# Dispatch-based transfer primitive (alternative to send/recv using Mori dispatch)
+dispatch_transfer_p = jcore.Primitive("dispatch_transfer")
+dispatch_transfer_p.multiple_results = True
+
+
+@dispatch_transfer_p.def_abstract_eval
+def dispatch_transfer_abstract_eval(
+    *args,
+    my_mpmd_idx: int,
+    target_mpmd_idx: int,
+    world_size: int,
+    hidden_dim: int,
+    is_sender: bool,
+    shardings,
+    shape_and_dtype=None,
+):
+    """
+    Abstract eval for dispatch-based transfer.
+    
+    When is_sender=True: inputs are the data to send, outputs are dropped
+    When is_sender=False: inputs may be empty, outputs are the received data
+    """
+    if is_sender:
+        # Sender: outputs are dropped (same as inputs for abstract eval)
+        return args
+    else:
+        # Receiver: outputs have shapes specified by shape_and_dtype
+        if shape_and_dtype:
+            return tuple(
+                jcore.ShapedArray(shape, dtype) 
+                for shape, dtype in shape_and_dtype
+            )
+        return args
+
+
+@dispatch_transfer_p.def_impl
+def dispatch_transfer_impl(
+    *args,
+    my_mpmd_idx: int,
+    target_mpmd_idx: int,
+    world_size: int,
+    hidden_dim: int,
+    is_sender: bool,
+    shardings,
+    shape_and_dtype=None,
+):
+    """
+    Implementation of dispatch-based transfer.
+    
+    All ranks must call this simultaneously (it's a collective).
+    Uses Mori's dispatch operation under the hood.
+    
+    NOTE: This is a "degenerate" use of dispatch where:
+    - num_experts_per_rank = 1 (one target per stage)
+    - num_experts_per_token = 1 (each token goes to exactly one place)
+    - expert_id == target_rank for simple routing
+    
+    The dispatch call is collective - all ranks call it together.
+    Sender provides data + routing indices, receiver gets data routed to it.
+    """
+    from jaxpp.dispatch_comm import (
+        dispatch_transfer_collective, 
+        MORI_AVAILABLE,
+    )
+    import jax.numpy as jnp
+    
+    if not MORI_AVAILABLE:
+        raise RuntimeError(
+            "Mori not available. Cannot use dispatch-based transfers. "
+            "Either install Mori or set JAXPP_USE_DISPATCH_TRANSFER=0"
+        )
+    
+    # FIXED: Get dtype consistently - prefer shape_and_dtype since it's 
+    # passed to ALL ranks (sender, receiver, and observers) for consistency
+    dtype = jnp.bfloat16
+    if shape_and_dtype:
+        # shape_and_dtype should be available for ALL ranks now
+        dtype = shape_and_dtype[0][1]
+    elif args:
+        dtype = args[0].dtype
+    
+    # Convert dtype class to dtype instance if needed
+    if isinstance(dtype, type):
+        dtype = jnp.dtype(dtype)
+    
+    # Determine if this rank is an observer (neither sender nor receiver)
+    is_observer = not is_sender and target_mpmd_idx == my_mpmd_idx
+    
+    # print(f"{my_mpmd_idx} my args hidden {hidden_dim} dtype={dtype} is_observer={is_observer}")
+    
+    # Perform the dispatch-based collective transfer
+    results = dispatch_transfer_collective(
+        arrays=list(args) if args else [],
+        target_rank=target_mpmd_idx,
+        my_rank=my_mpmd_idx,
+        world_size=world_size,
+        hidden_dim=hidden_dim,
+        is_sender=is_sender,
+        dtype=dtype,
+        shape_and_dtype=shape_and_dtype,
+        is_observer=is_observer,
+    )
+    
+    return tuple(results) if results else ()
+
+
 delete_p = jcore.Primitive("delete")
 # NOTE: we have delete equations for donated buffers as well
 #  which fail if Jax tries to canonicalize them.
@@ -313,6 +419,16 @@ def send_impl(*arrs, id, shardings):
             #  finish before the arrays is deleted.
             pass
         a._wait_send_finish = _wait_send_finish
+        
+    ss=""
+    for a, tgt, aremote in zip(arrs, tgt_mpmd_idxs, receiver_shardings):
+        tgt_dev = aremote._device_assignment[0].process_index
+        # tgt_dev == tgt
+        if a.ndim == 0:
+            ss += f"scalar {a} --> {tgt}"
+        else:
+            ss += f"{a.shape} --> {tgt}"
+    print(f"++++++ send {ss}")
     return arrs
 
 

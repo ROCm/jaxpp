@@ -68,6 +68,7 @@ from jaxpp.jax_primitives import (
     all_reduce_p,
     dax_pscan_p,
     delete_p,
+    dispatch_transfer_p,
     pipeline_yield_p,
     recv_p,
     send_done_p,
@@ -1666,6 +1667,11 @@ def loop_placement_by_clusters(
                 break
         if mubatch_idx_update_eqn is not None:
             break
+        
+    print(f"----- mubatch_idx_update_eqn_idx: {mubatch_idx_update_eqn_idx} --------", flush=True)
+    print(f"----- Xjaxpr outvars: {jaxpr.outvars} {mubatch_idx_outvar}--------", flush=True)
+    # print(f"----- Xjaxpr eqns: {jaxpr.eqns} --------", flush=True)
+
 
     if not (
         mubatch_idx_update_eqn is not None
@@ -1677,6 +1683,7 @@ def loop_placement_by_clusters(
 
     eqns = list(jaxpr.eqns)
     eqns.pop(mubatch_idx_update_eqn_idx)
+    print(f"mubatch_idx_update_eqn: {mubatch_idx_update_eqn} --------", flush=True)
     clusters, _ = cluster_eqns(eqns, get_mpmd_idx)
     clusters[0].eqns.insert(0, mubatch_idx_update_eqn)
     cluster_info = get_cluster_information(clusters)
@@ -2314,6 +2321,10 @@ def compute_transfers(eqns: list[jcore.JaxprEqn]) -> list[list[TransferTo]]:
             assert def_eqn.primitive is task_p, def_eqn.primitive
 
             if eqn_mpmd_idx != def_eqn.params["mpmd_idx"]:
+                def_mpmd_idx = def_eqn.params["mpmd_idx"]
+                
+                [v.aval.shape for v in eqn.invars]
+                print(f"def_mpmd_idx {def_mpmd_idx} -> {eqn_mpmd_idx} shape {invar.aval.shape} --------", flush=True)
                 resolved_transfer.add(VisitedElem(eqn_mpmd_idx, invar))
                 transfers[_.eqn_idx].append(
                     TransferTo(eqn_mpmd_idx, _.outvar_idx, eqn_idx)
@@ -2331,9 +2342,14 @@ def add_transfers(eqns: list[GlobalTimeEqn[jcore.JaxprEqn]]) -> list[jcore.Jaxpr
     # TODO: revisit when transfers are scheduled and bufferize receives
     #  earlier than the transfer
     next_time_transfers = list[tuple[int, jcore.JaxprEqn]]()
+    
+    print("add_transfers", flush=True)
     for eqn_idx, _ in enumerate(eqns):
         start_time = _.start_time
+        
         eqn = _.elem
+        print(f"----- start_time: {start_time} eqn_idx: {eqn_idx} mpmd_idx: {eqn.params['mpmd_idx']}", flush=True)
+
         if start_time != prev_start_time:
             for _, transfer in sorted(next_time_transfers, key=operator.itemgetter(0)):
                 new_eqns.append(transfer)
@@ -2721,6 +2737,140 @@ def maybe_unroll_loop(tasked_jaxpr: jcore.ClosedJaxpr):
     )
     return res
 
+def create_cupy_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jaxpr,
+            sender_shardings, receiver_shardings, eqn_by_mpmd_idx : list[list[Any]]):
+
+    hidden_dim = sum(
+        v.aval.size for v in eqn.invars
+    ) if eqn.invars else 0
+
+    src_mpmd_idx = eqn.params["src_mpmd_idx"]
+    tgt_mpmd_idx = eqn.params["tgt_mpmd_idx"]
+    
+    print(f"----- hidden_dim: {hidden_dim} src:{src_mpmd_idx}->tgt:{tgt_mpmd_idx} shapes: {[v.aval.shape for v in eqn.invars]} --------", flush=True)
+
+    # Use traditional CuPy NCCL send/recv
+    send_eqn = jcore.new_jaxpr_eqn(
+        invars=eqn.invars,
+        outvars=[jcore.DropVar(v.aval) for v in eqn.invars],
+        primitive=send_p,
+        params={
+            "id": op_id,
+            "shardings": tuple(
+                zip(
+                    (tgt_mpmd_idx,) * len(eqn.invars),
+                    receiver_shardings,
+                    strict=True,
+                )
+            ),
+        },
+        effects=jcore.no_effects,  # FIXME
+    )
+
+    recv_invars = []
+    if False:  # FIXME
+        recv_buffers = [
+            (gensym(v.aval), sh)
+            for v, sh in zip(eqn.invars, receiver_shardings, strict=True)
+        ]
+        recvs_buffer_by_mpmd_idx[tgt_mpmd_idx].extend(recv_buffers)
+        recv_invars = ju.unzip2(recv_buffers)[0]
+
+    recv_eqn = jcore.new_jaxpr_eqn(
+        invars=recv_invars,
+        outvars=eqn.outvars,
+        primitive=recv_p,
+        params={
+            "id": op_id,
+            "shape_and_dtype": [
+                (v.aval.shape, v.aval.dtype) for v in eqn.invars
+            ],
+            "shardings": tuple(
+                zip(
+                    (src_mpmd_idx,) * len(eqn.outvars),
+                    sender_shardings,
+                    strict=True,
+                )
+            ),
+        },
+        effects=jcore.no_effects,  # FIXME
+    )
+
+    eqn_by_mpmd_idx[src_mpmd_idx].append(send_eqn)
+    eqn_by_mpmd_idx[tgt_mpmd_idx].append(recv_eqn)
+
+
+def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jaxpr,
+                    sender_shardings, receiver_shardings, eqn_by_mpmd_idx : list[list[Any]]):
+    # Use Mori dispatch-based transfer (collective operation)
+    # All stages must participate, even if they're not sender/receiver
+    hidden_dim = sum(
+        v.aval.size for v in eqn.invars
+    ) if eqn.invars else 0
+
+    src_mpmd_idx = eqn.params["src_mpmd_idx"]
+    tgt_mpmd_idx = eqn.params["tgt_mpmd_idx"]
+    
+    # IMPORTANT: shape_and_dtype needed by ALL ranks for consistent dtype in dispatch config
+    shape_and_dtype = [(v.aval.shape, v.aval.dtype) for v in eqn.invars]
+    
+    print(f"----- hidden_dim: {hidden_dim} src:{src_mpmd_idx}->tgt:{tgt_mpmd_idx} shapes: {[v.aval.shape for v in eqn.invars]} --------")
+    
+    for mpmd_idx in range(mpmd_mesh.mpmd_dim):
+        if mpmd_idx == src_mpmd_idx:
+            # Sender: has input data, sends to target
+            dispatch_eqn = jcore.new_jaxpr_eqn(
+                invars=eqn.invars,
+                outvars=[jcore.DropVar(v.aval) for v in eqn.invars],
+                primitive=dispatch_transfer_p,
+                params={
+                    "my_mpmd_idx": mpmd_idx,
+                    "target_mpmd_idx": tgt_mpmd_idx,
+                    "world_size": mpmd_mesh.mpmd_dim,
+                    "hidden_dim": hidden_dim,
+                    "is_sender": True,
+                    "shardings": tuple(sender_shardings),
+                    "shape_and_dtype": shape_and_dtype,  # For dtype consistency
+                },
+                effects=jcore.no_effects,
+            )
+        elif mpmd_idx == tgt_mpmd_idx:
+            # Receiver: receives data from sender
+            dispatch_eqn = jcore.new_jaxpr_eqn(
+                invars=[],
+                outvars=eqn.outvars,
+                primitive=dispatch_transfer_p,
+                params={
+                    "my_mpmd_idx": mpmd_idx,
+                    "target_mpmd_idx": -1,  # Not sending
+                    "world_size": mpmd_mesh.mpmd_dim,
+                    "hidden_dim": hidden_dim,
+                    "is_sender": False,
+                    "shardings": tuple(receiver_shardings),
+                    "shape_and_dtype": shape_and_dtype,  # For dtype consistency + output shape
+                },
+                effects=jcore.no_effects,
+            )
+        else:
+            # Observer: participates in collective but doesn't send/receive
+            # Creates a no-op dispatch equation
+            dispatch_eqn = jcore.new_jaxpr_eqn(
+                invars=[],
+                outvars=[],
+                primitive=dispatch_transfer_p,
+                params={
+                    "my_mpmd_idx": mpmd_idx,
+                    "target_mpmd_idx": mpmd_idx,  # Send to self (no-op)
+                    "world_size": mpmd_mesh.mpmd_dim,
+                    "hidden_dim": hidden_dim,
+                    "is_sender": False,
+                    "shardings": (),
+                    "shape_and_dtype": shape_and_dtype,  # For dtype consistency
+                },
+                effects=jcore.no_effects,
+            )
+        eqn_by_mpmd_idx[mpmd_idx].append(dispatch_eqn)
+
 
 def scalarize(
     tasked_jaxpr: jcore.ClosedJaxpr, mpmd_mesh: MpmdMesh
@@ -2746,55 +2896,12 @@ def scalarize(
             receiver_shardings = updated_named_sharding_mesh(
                 eqn.params["src_shardings"], mpmd_mesh.unstack[tgt_mpmd_idx]
             )
-
-            send_eqn = jcore.new_jaxpr_eqn(
-                invars=eqn.invars,
-                outvars=[jcore.DropVar(v.aval) for v in eqn.invars],
-                primitive=send_p,
-                params={
-                    "id": op_id,
-                    "shardings": tuple(
-                        zip(
-                            (tgt_mpmd_idx,) * len(eqn.invars),
-                            receiver_shardings,
-                            strict=True,
-                        )
-                    ),
-                },
-                effects=jcore.no_effects,  # FIXME
-            )
-
-            recv_invars = []
-            if False:  # FIXME
-                recv_buffers = [
-                    (gensym(v.aval), sh)
-                    for v, sh in zip(eqn.invars, receiver_shardings, strict=True)
-                ]
-                recvs_buffer_by_mpmd_idx[tgt_mpmd_idx].extend(recv_buffers)
-                recv_invars = ju.unzip2(recv_buffers)[0]
-
-            recv_eqn = jcore.new_jaxpr_eqn(
-                invars=recv_invars,
-                outvars=eqn.outvars,
-                primitive=recv_p,
-                params={
-                    "id": op_id,
-                    "shape_and_dtype": [
-                        (v.aval.shape, v.aval.dtype) for v in eqn.invars
-                    ],
-                    "shardings": tuple(
-                        zip(
-                            (src_mpmd_idx,) * len(eqn.outvars),
-                            sender_shardings,
-                            strict=True,
-                        )
-                    ),
-                },
-                effects=jcore.no_effects,  # FIXME
-            )
-
-            eqn_by_mpmd_idx[src_mpmd_idx].append(send_eqn)
-            eqn_by_mpmd_idx[tgt_mpmd_idx].append(recv_eqn)
+            if True:
+                create_dispatch_transfers(mpmd_mesh, op_id, eqn,
+                    sender_shardings, receiver_shardings, eqn_by_mpmd_idx)
+            else:
+                create_cupy_transfers(mpmd_mesh, op_id, eqn,
+                    sender_shardings, receiver_shardings, eqn_by_mpmd_idx)
         elif eqn.primitive is add_multi_p:
             # NOTE: all shardings are enforced to be the same
             # by `reconcile_shardings`
