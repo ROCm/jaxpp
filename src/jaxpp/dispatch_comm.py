@@ -105,6 +105,11 @@ def dispatch_transfer_collective(
 
     results = []
     if is_sender and arrays:
+        # Route to target_rank
+        indices = jnp.array([[target_rank]], dtype=jnp.int32)
+        dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
+        dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
+        
         for arr, (shape, dtype) in zip(arrays, shape_and_dtype):
             flat_size = arr.size
             config = DispatchTransferConfig(
@@ -126,11 +131,6 @@ def dispatch_transfer_collective(
             #     padding = jnp.zeros((1, hidden_dim - flat_size), dtype=dtype)
             #     token_data = jnp.concatenate([token_data, padding], axis=1)
             
-            # Route to target_rank
-            indices = jnp.array([[target_rank]], dtype=jnp.int32)
-            dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
-            dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
-            
             # TODO we shall None when scales/weights are not given
             (out_data, _, _, _, num_recv) = handle.dispatch(
                 token_data, dummy_weights, dummy_scales, indices,
@@ -146,6 +146,11 @@ def dispatch_transfer_collective(
         
         return results
     else:
+        # Receiver or observer: participate in collective
+        indices = jnp.array([[target_rank]], dtype=jnp.int32)
+        dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
+        dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
+
         for shape, dtype in shape_and_dtype:
             flat_size = int(np.prod(shape))
             config = DispatchTransferConfig(
@@ -155,13 +160,7 @@ def dispatch_transfer_collective(
                 dtype=dtype,
             )
             handle = get_dispatch_handle(config)
-            
-            # Receiver or observer: participate in collective
             dummy_token = jnp.zeros((1, flat_size), dtype=dtype)
-            # dummy_token = jnp.full((1, flat_size), 777, dtype=dtype)
-            indices = jnp.array([[target_rank]], dtype=jnp.int32)
-            dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
-            dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
         
             # Call dispatch - will receive data routed to this rank
             (out_data, _, _, _, num_recv) = handle.dispatch(
@@ -175,7 +174,9 @@ def dispatch_transfer_collective(
             if my_rank == target_rank:
                 continue
         
-            arr = out_data[0, :flat_size]
+            # it looks like we do not have to slice here since our token size
+            # is exactly 'flat_size'
+            arr = out_data[0] #[0, :flat_size]
             arr = arr.reshape(shape) #.astype(dtype)
             results.append(arr)
         return results
