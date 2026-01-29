@@ -17,20 +17,18 @@ from jax.lax import with_sharding_constraint
 
 def init_distributed():
   parser = argparse.ArgumentParser()
-  parser.add_argument("--jax_distributed", action="store_true")
-  parser.add_argument("--process_count", type=int, default=1)
-  parser.add_argument("--process_index", type=int, default=0)
+  parser.add_argument("--world_size", type=int, default=1)
+  parser.add_argument("--rank", type=int, default=0)
   parser.add_argument("--coordination_service", type=str, default="")
   args, _ = parser.parse_known_args()
 
-  if args.jax_distributed:
-    dist.initialize(
+  dist.initialize(
       coordinator_address=args.coordination_service or "localhost:1234",
-      num_processes=args.process_count,
-      process_id=args.process_index,
-    )
-  print(f"[rank {args.process_index}] devices = {jax.local_devices()}")
-  return (args.process_index, args.process_count)
+      num_processes=args.world_size,
+      process_id=args.rank,
+  )
+  print(f"[rank {args.rank}] devices = {jax.local_devices()}")
+  return (args.rank, args.world_size)
 
 class MLP(nn.Module):
   hidden1: int = 256
