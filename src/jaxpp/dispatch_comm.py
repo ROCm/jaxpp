@@ -96,64 +96,35 @@ def get_dispatch_handle(config: DispatchTransferConfig) -> Any:
 
 def dispatch_transfer_collective(
     arrays: Sequence[jax.Array],
-    target_rank: int,
     my_rank: int,
+    target_rank: int,
     world_size: int,
-    hidden_dim: int,
     is_sender: bool,
-    dtype: jnp.dtype,
     shape_and_dtype: list[tuple],
 ) -> list[jax.Array]:
-    """
-    Collective dispatch-based transfer for pipeline parallel communication.
-    
-    This function must be called by ALL ranks simultaneously (it's collective).
-    The sender provides data and routing, receivers get data routed to them.
-    
-    Args:
-        arrays: List of arrays to send (only used if is_sender=True)
-        target_rank: Destination rank for sender, or -1 for non-senders
-        my_rank: This process's rank
-        world_size: Total number of ranks
-        hidden_dim: Size of data being transferred (for buffer allocation)
-        is_sender: True if this rank is sending data
-        dtype: Data type for dispatch config
-        shape_and_dtype: List of (shape, dtype) tuples for receiver outputs
-        is_observer: True if this rank is an observer (neither sender nor receiver)
-    
-    Returns:
-        List of received arrays (original arrays for sender, received data for receiver)
-        Empty list for observers.
-    """
-    config = DispatchTransferConfig(
-        rank=my_rank,
-        world_size=world_size,
-        hidden_dim=hidden_dim,
-        dtype=dtype,
-    )
-    handle = get_dispatch_handle(config)
-    
+
+    results = []
     if is_sender and arrays:
-        # Sender: pack arrays into tokens and route to target
-        results = []
-        for arr in arrays:
-            
+        for arr, (shape, dtype) in zip(arrays, shape_and_dtype):
+            flat_size = arr.size
+            config = DispatchTransferConfig(
+                rank=my_rank,
+                world_size=world_size,
+                hidden_dim=flat_size,
+                dtype=dtype,
+            )
+            handle = get_dispatch_handle(config)
+
             # DEBUG: Print what we're sending
             # print(f"[rank {my_rank}] SEND to {target_rank}: "
             #       f"shape={arr.shape} dtype={arr.dtype} "
             #       f"first={arr.flatten()[0]} sum={float(arr.sum())}", flush=True)
-            
-            original_shape = arr.shape
-            original_dtype = arr.dtype
-            flat_size = arr.size
-            
-            # Flatten to [1, size] "token" format
-            token_data = arr.reshape(1, flat_size).astype(dtype)
+            token_data = arr.reshape(1, flat_size) #.astype(dtype)
             
             # Pad to hidden_dim if needed
-            if flat_size < hidden_dim:
-                padding = jnp.zeros((1, hidden_dim - flat_size), dtype=dtype)
-                token_data = jnp.concatenate([token_data, padding], axis=1)
+            # if flat_size < hidden_dim:
+            #     padding = jnp.zeros((1, hidden_dim - flat_size), dtype=dtype)
+            #     token_data = jnp.concatenate([token_data, padding], axis=1)
             
             # Route to target_rank
             indices = jnp.array([[target_rank]], dtype=jnp.int32)
@@ -174,39 +145,39 @@ def dispatch_transfer_collective(
             results.append(arr)
         
         return results
-    
     else:
-        # Receiver or observer: participate in collective
-        dummy_token = jnp.zeros((1, hidden_dim), dtype=dtype)
-        # dummy_token = jnp.full((1, hidden_dim), 777, dtype=dtype)
-
-        indices = jnp.array([[target_rank]], dtype=jnp.int32)  # Send to self
-        dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
-        dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
-        
-        # Call dispatch - will receive data routed to this rank
-        (out_data, _, _, _, num_recv) = handle.dispatch(
-            dummy_token, dummy_weights, dummy_scales, indices,
-            has_scales=False,
-            has_weights=False,
-            block_num=80,
-            warp_per_block=16,
-        )
-        
-        # IMPORTANT: Observer must return empty list (outvars=[])
-        if my_rank == target_rank:
-            return []
-        
-        # If we received data and have shape info, reshape appropriately
-        results = []
-        offset = 0
-        for shape, out_dtype in shape_and_dtype:
+        for shape, dtype in shape_and_dtype:
             flat_size = int(np.prod(shape))
-            # Extract the data for this array
-            arr_data = out_data[0, offset:offset + flat_size]
-            arr_data = arr_data.reshape(shape).astype(out_dtype)
-            results.append(arr_data)
-            offset += flat_size
+            config = DispatchTransferConfig(
+                rank=my_rank,
+                world_size=world_size,
+                hidden_dim=flat_size,
+                dtype=dtype,
+            )
+            handle = get_dispatch_handle(config)
+            
+            # Receiver or observer: participate in collective
+            dummy_token = jnp.zeros((1, flat_size), dtype=dtype)
+            # dummy_token = jnp.full((1, flat_size), 777, dtype=dtype)
+            indices = jnp.array([[target_rank]], dtype=jnp.int32)
+            dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
+            dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
+        
+            # Call dispatch - will receive data routed to this rank
+            (out_data, _, _, _, num_recv) = handle.dispatch(
+                dummy_token, dummy_weights, dummy_scales, indices,
+                has_scales=False,
+                has_weights=False,
+                block_num=80,
+                warp_per_block=16,
+            )
+            # IMPORTANT: Observer must return empty list (outvars=[])
+            if my_rank == target_rank:
+                continue
+        
+            arr = out_data[0, :flat_size]
+            arr = arr.reshape(shape) #.astype(dtype)
+            results.append(arr)
         return results
 
 def cleanup_dispatch_handles():

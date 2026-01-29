@@ -205,13 +205,11 @@ dispatch_transfer_p.multiple_results = True
 @dispatch_transfer_p.def_abstract_eval
 def dispatch_transfer_abstract_eval(
     *args,
-    src_idx: int,
-    tgt_idx: int,
+    my_idx: int,
+    remote_idx: int,  # to whom we send or from whom we receive
     world_size: int,
-    hidden_dim: int,
     is_sender: bool,
-    shardings,
-    shape_and_dtype=None,
+    shape_and_dtype,
 ):
     """
     Abstract eval for dispatch-based transfer.
@@ -224,12 +222,10 @@ def dispatch_transfer_abstract_eval(
         return args
     else:
         # Receiver: outputs have shapes specified by shape_and_dtype
-        if shape_and_dtype:
-            return tuple(
+        return tuple(
                 jcore.ShapedArray(shape, dtype) 
                 for shape, dtype in shape_and_dtype
-            )
-        return args
+        )
 
 
 @dispatch_transfer_p.def_impl
@@ -238,10 +234,8 @@ def dispatch_transfer_impl(
     my_idx: int,
     remote_idx: int,  # to whom we send or from whom we receive
     world_size: int,
-    hidden_dim: int,
     is_sender: bool,
-    shardings,
-    shape_and_dtype=None,
+    shape_and_dtype,
 ):
     """
     Implementation of dispatch-based transfer.
@@ -257,31 +251,13 @@ def dispatch_transfer_impl(
     The dispatch call is collective - all ranks call it together.
     Sender provides data + routing indices, receiver gets data routed to it.
     """
-    
-    # FIXED: Get dtype consistently - prefer shape_and_dtype since it's 
-    # passed to ALL ranks (sender, receiver, and observers) for consistency
-    dtype = jnp.bfloat16
-    if shape_and_dtype:
-        # shape_and_dtype should be available for ALL ranks now
-        dtype = shape_and_dtype[0][1]
-    elif args:
-        dtype = args[0].dtype
-    
-    # Convert dtype class to dtype instance if needed
-    if isinstance(dtype, type):
-        dtype = jnp.dtype(dtype)
-   
-    #print(f"{my_idx} my args hidden {hidden_dim} shape_and_dtype={shape_and_dtype} is_sender={is_sender}")
-    
     # Perform the dispatch-based collective transfer
     results = dispatch_transfer_collective(
         arrays=list(args) if args else [],
-        target_rank=remote_idx,
         my_rank=my_idx,
+        target_rank=remote_idx,
         world_size=world_size,
-        hidden_dim=hidden_dim,
         is_sender=is_sender,
-        dtype=dtype,
         shape_and_dtype=shape_and_dtype,
     )
     

@@ -2803,41 +2803,28 @@ def create_cupy_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jaxpr,
 
 
 def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jaxpr,
-                    sender_shardings, receiver_shardings, eqn_by_mpmd_idx : list[list[Any]]):
-    # Use Mori dispatch-based transfer (collective operation)
-    # All stages must participate, even if they're not sender/receiver
-    # hidden_dim = sum(
-    #     v.aval.size for v in eqn.invars
-    # ) if eqn.invars else 0
-
+                    eqn_by_mpmd_idx : list[list[Any]]):
+    
     src_mpmd_idx = eqn.params["src_mpmd_idx"]
     tgt_mpmd_idx = eqn.params["tgt_mpmd_idx"]
     
-    # IMPORTANT: shape_and_dtype needed by ALL ranks for consistent dtype in dispatch config
-    #shape_and_dtype = [(v.aval.shape, v.aval.dtype) for v in eqn.invars]
+    shape_and_dtype = [(v.aval.shape, v.aval.dtype) for v in eqn.invars]
     #print(f"src:{src_mpmd_idx}->tgt:{tgt_mpmd_idx} shapes: {[v.aval.shape for v in eqn.invars]} --------")
-    
+      
+    # NOTE currently we treat each inv/out var independently!!    
     for mpmd_idx in range(mpmd_mesh.mpmd_dim):
-      # NOTE currently we treat each inv/out var independently!!
-      for inv, outv in zip(eqn.invars, eqn.outvars):
-        
-        hidden_dim = inv.aval.size
-        shape_and_dtype = [(inv.aval.shape, inv.aval.dtype)]
-        
         if mpmd_idx == src_mpmd_idx:
             # Sender: has input data, sends to target
             dispatch_eqn = jcore.new_jaxpr_eqn(
-                invars=[inv],
-                outvars=[jcore.DropVar(inv.aval)],
+                invars=eqn.invars,
+                outvars=[jcore.DropVar(v.aval) for v in eqn.invars],
                 primitive=dispatch_transfer_p,
                 params={
                     "my_idx": mpmd_idx,
                     "remote_idx": tgt_mpmd_idx,
                     "world_size": mpmd_mesh.mpmd_dim,
-                    "hidden_dim": hidden_dim,
                     "is_sender": True,
-                    "shardings": tuple(sender_shardings),
-                    "shape_and_dtype": shape_and_dtype,  # For dtype consistency
+                    "shape_and_dtype": shape_and_dtype,
                 },
                 effects=jcore.no_effects,
             )
@@ -2845,16 +2832,14 @@ def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jax
             # Receiver: receives data from sender
             dispatch_eqn = jcore.new_jaxpr_eqn(
                 invars=[],
-                outvars=[outv],
+                outvars=eqn.outvars,
                 primitive=dispatch_transfer_p,
                 params={
                     "my_idx": mpmd_idx,
                     "remote_idx": src_mpmd_idx,
                     "world_size": mpmd_mesh.mpmd_dim,
-                    "hidden_dim": hidden_dim,
                     "is_sender": False,
-                    "shardings": tuple(receiver_shardings),
-                    "shape_and_dtype": shape_and_dtype,  # For dtype consistency + output shape
+                    "shape_and_dtype": shape_and_dtype,
                 },
                 effects=jcore.no_effects,
             )
@@ -2869,10 +2854,8 @@ def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jax
                     "my_idx": mpmd_idx,
                     "remote_idx": mpmd_idx,  # Send to self (no-op)
                     "world_size": mpmd_mesh.mpmd_dim,
-                    "hidden_dim": hidden_dim,
                     "is_sender": False,
-                    "shardings": (),
-                    "shape_and_dtype": shape_and_dtype,  # For dtype consistency
+                    "shape_and_dtype": shape_and_dtype,
                 },
                 effects=jcore.no_effects,
             )
@@ -2904,8 +2887,7 @@ def scalarize(
                 eqn.params["src_shardings"], mpmd_mesh.unstack[tgt_mpmd_idx]
             )
             if USE_DISPATCH_OP:
-                create_dispatch_transfers(mpmd_mesh, op_id, eqn,
-                    sender_shardings, receiver_shardings, eqn_by_mpmd_idx)
+                create_dispatch_transfers(mpmd_mesh, op_id, eqn, eqn_by_mpmd_idx)
             else:
                 create_cupy_transfers(mpmd_mesh, op_id, eqn,
                     sender_shardings, receiver_shardings, eqn_by_mpmd_idx)
