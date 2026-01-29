@@ -116,10 +116,10 @@ export XLA_FLAGS="--xla_gpu_enable_cublaslt=true \
            --xla_gpu_memory_limit_slop_factor=95 \
            --xla_gpu_autotune_gemm_rtol=0.01"
 
-NumProcs=8
-TotalGpus=8
-#TEST=examples/simple_dense_model.py
-TEST=jax_playground.py
+NumProcs=4
+TotalGpus=4
+TEST=examples/simple_dense_model.py
+# TEST=jax_playground.py
 pkill -9 -c -f python
 rm -f $XLA_DIR/zzout_*.log
 

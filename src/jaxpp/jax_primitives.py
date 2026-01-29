@@ -37,8 +37,10 @@ from jaxpp.mesh import MpmdMesh
 from jaxpp.types import TaskType
 from jaxpp.utils import get_named_sharding, updated_named_sharding_mesh
 
-logger = logging.getLogger(__name__)
+from jaxpp.dispatch_comm import dispatch_transfer_collective
+import jax.numpy as jnp
 
+logger = logging.getLogger(__name__)
 add_multi_p = jcore.Primitive("add_multi")
 
 
@@ -203,8 +205,8 @@ dispatch_transfer_p.multiple_results = True
 @dispatch_transfer_p.def_abstract_eval
 def dispatch_transfer_abstract_eval(
     *args,
-    my_mpmd_idx: int,
-    target_mpmd_idx: int,
+    src_idx: int,
+    tgt_idx: int,
     world_size: int,
     hidden_dim: int,
     is_sender: bool,
@@ -233,8 +235,8 @@ def dispatch_transfer_abstract_eval(
 @dispatch_transfer_p.def_impl
 def dispatch_transfer_impl(
     *args,
-    my_mpmd_idx: int,
-    target_mpmd_idx: int,
+    my_idx: int,
+    remote_idx: int,  # to whom we send or from whom we receive
     world_size: int,
     hidden_dim: int,
     is_sender: bool,
@@ -255,17 +257,6 @@ def dispatch_transfer_impl(
     The dispatch call is collective - all ranks call it together.
     Sender provides data + routing indices, receiver gets data routed to it.
     """
-    from jaxpp.dispatch_comm import (
-        dispatch_transfer_collective, 
-        MORI_AVAILABLE,
-    )
-    import jax.numpy as jnp
-    
-    if not MORI_AVAILABLE:
-        raise RuntimeError(
-            "Mori not available. Cannot use dispatch-based transfers. "
-            "Either install Mori or set JAXPP_USE_DISPATCH_TRANSFER=0"
-        )
     
     # FIXED: Get dtype consistently - prefer shape_and_dtype since it's 
     # passed to ALL ranks (sender, receiver, and observers) for consistency
@@ -279,24 +270,27 @@ def dispatch_transfer_impl(
     # Convert dtype class to dtype instance if needed
     if isinstance(dtype, type):
         dtype = jnp.dtype(dtype)
-    
-    # Determine if this rank is an observer (neither sender nor receiver)
-    is_observer = not is_sender and target_mpmd_idx == my_mpmd_idx
-    
-    # print(f"{my_mpmd_idx} my args hidden {hidden_dim} dtype={dtype} is_observer={is_observer}")
+   
+    #print(f"{my_idx} my args hidden {hidden_dim} shape_and_dtype={shape_and_dtype} is_sender={is_sender}")
     
     # Perform the dispatch-based collective transfer
     results = dispatch_transfer_collective(
         arrays=list(args) if args else [],
-        target_rank=target_mpmd_idx,
-        my_rank=my_mpmd_idx,
+        target_rank=remote_idx,
+        my_rank=my_idx,
         world_size=world_size,
         hidden_dim=hidden_dim,
         is_sender=is_sender,
         dtype=dtype,
         shape_and_dtype=shape_and_dtype,
-        is_observer=is_observer,
     )
+    
+    # DEBUG: Print received data for receivers
+    # if not is_sender and my_idx != remote_idx:
+    #     for i, r in enumerate(results):
+    #         print(f"[rank {my_idx}] DISPATCH_RECV[{i}]: "
+    #               f"shape={r.shape} dtype={r.dtype} "
+    #               f"first={r.flatten()[0]} sum={r.sum()}", flush=True)
     
     return tuple(results) if results else ()
 
@@ -428,7 +422,7 @@ def send_impl(*arrs, id, shardings):
             ss += f"scalar {a} --> {tgt}"
         else:
             ss += f"{a.shape} --> {tgt}"
-    print(f"++++++ send {ss}")
+    # print(f"++++++ send {ss}")
     return arrs
 
 

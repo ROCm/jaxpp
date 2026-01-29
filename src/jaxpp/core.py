@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+USE_DISPATCH_OP=True
+
 import abc
 import dataclasses
 import functools
@@ -2804,28 +2806,33 @@ def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jax
                     sender_shardings, receiver_shardings, eqn_by_mpmd_idx : list[list[Any]]):
     # Use Mori dispatch-based transfer (collective operation)
     # All stages must participate, even if they're not sender/receiver
-    hidden_dim = sum(
-        v.aval.size for v in eqn.invars
-    ) if eqn.invars else 0
+    # hidden_dim = sum(
+    #     v.aval.size for v in eqn.invars
+    # ) if eqn.invars else 0
 
     src_mpmd_idx = eqn.params["src_mpmd_idx"]
     tgt_mpmd_idx = eqn.params["tgt_mpmd_idx"]
     
     # IMPORTANT: shape_and_dtype needed by ALL ranks for consistent dtype in dispatch config
-    shape_and_dtype = [(v.aval.shape, v.aval.dtype) for v in eqn.invars]
-    
-    print(f"----- hidden_dim: {hidden_dim} src:{src_mpmd_idx}->tgt:{tgt_mpmd_idx} shapes: {[v.aval.shape for v in eqn.invars]} --------")
+    #shape_and_dtype = [(v.aval.shape, v.aval.dtype) for v in eqn.invars]
+    #print(f"src:{src_mpmd_idx}->tgt:{tgt_mpmd_idx} shapes: {[v.aval.shape for v in eqn.invars]} --------")
     
     for mpmd_idx in range(mpmd_mesh.mpmd_dim):
+      # NOTE currently we treat each inv/out var independently!!
+      for inv, outv in zip(eqn.invars, eqn.outvars):
+        
+        hidden_dim = inv.aval.size
+        shape_and_dtype = [(inv.aval.shape, inv.aval.dtype)]
+        
         if mpmd_idx == src_mpmd_idx:
             # Sender: has input data, sends to target
             dispatch_eqn = jcore.new_jaxpr_eqn(
-                invars=eqn.invars,
-                outvars=[jcore.DropVar(v.aval) for v in eqn.invars],
+                invars=[inv],
+                outvars=[jcore.DropVar(inv.aval)],
                 primitive=dispatch_transfer_p,
                 params={
-                    "my_mpmd_idx": mpmd_idx,
-                    "target_mpmd_idx": tgt_mpmd_idx,
+                    "my_idx": mpmd_idx,
+                    "remote_idx": tgt_mpmd_idx,
                     "world_size": mpmd_mesh.mpmd_dim,
                     "hidden_dim": hidden_dim,
                     "is_sender": True,
@@ -2838,11 +2845,11 @@ def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jax
             # Receiver: receives data from sender
             dispatch_eqn = jcore.new_jaxpr_eqn(
                 invars=[],
-                outvars=eqn.outvars,
+                outvars=[outv],
                 primitive=dispatch_transfer_p,
                 params={
-                    "my_mpmd_idx": mpmd_idx,
-                    "target_mpmd_idx": -1,  # Not sending
+                    "my_idx": mpmd_idx,
+                    "remote_idx": src_mpmd_idx,
                     "world_size": mpmd_mesh.mpmd_dim,
                     "hidden_dim": hidden_dim,
                     "is_sender": False,
@@ -2859,8 +2866,8 @@ def create_dispatch_transfers(mpmd_mesh : MpmdMesh, op_id : int, eqn : jcore.Jax
                 outvars=[],
                 primitive=dispatch_transfer_p,
                 params={
-                    "my_mpmd_idx": mpmd_idx,
-                    "target_mpmd_idx": mpmd_idx,  # Send to self (no-op)
+                    "my_idx": mpmd_idx,
+                    "remote_idx": mpmd_idx,  # Send to self (no-op)
                     "world_size": mpmd_mesh.mpmd_dim,
                     "hidden_dim": hidden_dim,
                     "is_sender": False,
@@ -2896,7 +2903,7 @@ def scalarize(
             receiver_shardings = updated_named_sharding_mesh(
                 eqn.params["src_shardings"], mpmd_mesh.unstack[tgt_mpmd_idx]
             )
-            if True:
+            if USE_DISPATCH_OP:
                 create_dispatch_transfers(mpmd_mesh, op_id, eqn,
                     sender_shardings, receiver_shardings, eqn_by_mpmd_idx)
             else:

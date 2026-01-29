@@ -5,6 +5,7 @@ import jax.distributed as dist
 from functools import partial
 from jax import random
 from flax import linen as nn
+import time
 import numpy as np
 import argparse, math
 
@@ -68,7 +69,7 @@ class MLP(nn.Module):
     return x
 
 def main():
-  BATCH_SIZE=2048
+  BATCH_SIZE=20480
   FEAT_SIZE=16
   # 4 ubatches
   #def_mpmd_idx 0 -> 1 shape (512, 770) --------
@@ -79,7 +80,7 @@ def main():
   
   N_UBATCHES=4      # number of microbatches
   LR=1e-3           # learning rate
-  N_STEPS=400
+  N_STEPS=200
   usePP=True
   jaxDistributed=True
   
@@ -177,15 +178,35 @@ def main():
   #print(jaxpr_fn(val)) ---> prints jaxpr impression
 
   XY = (x_local, y_local)
-  for step in range(N_STEPS):
+  # Warm-up runs (JIT compilation happens here)
+  WARMUP_STEPS = 5
+  print(f"[rank {rank}] Warm-up runs {WARMUP_STEPS}")
+  for step in range(WARMUP_STEPS):
+    start = time.perf_counter()
     params, losses, preds = jit_train_step(params, XY)
+    # Block until computation is done
+    jax.block_until_ready((params, losses, preds))
+  
+  times = []
+  for step in range(N_STEPS):
+    start = time.perf_counter()
+    params, losses, preds = jit_train_step(params, XY)
+    jax.block_until_ready((params, losses, preds))
+    end = time.perf_counter()
+    
+    step_time_ms = (end - start) * 1000
+    times.append(step_time_ms)
+    
     if (step + 1) % 10 == 0:
+      print(f"[rank {rank}] step={step+1} time={step_time_ms:.2f}ms", flush=True)
       if usePP and losses.is_partially_addressable:
         loss = losses.to_mpmd_local_array.sum() / N_UBATCHES
-        print(f"[rank {rank}] step={step} part addr: {loss}")
+        print(f"[rank {rank}] step={step} loss: {loss}", flush=True)
       if not usePP:
         loss = losses.sum() / N_UBATCHES
-        print(f"[rank {rank}] step={step} part addr: {loss}")
+        print(f"[rank {rank}] step={step} loss: {loss}", flush=True)
 
+  print(f"[rank {rank}] average time = {sum(times) / len(times):.2f}ms", flush=True)
+  
 if __name__ == "__main__":
   main()

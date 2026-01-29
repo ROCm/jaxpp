@@ -13,17 +13,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Import mori - may not be available in all environments
-try:
-    import mori
-    from mori.ops import EpDispatchCombineConfig, EpDispatchCombineOp
-    from mori.ops import EpDispatchCombineKernelType
-    from mori.ops import mori_shmem_init_attr
-    MORI_AVAILABLE = True
-except ImportError:
-    MORI_AVAILABLE = False
-    logger.warning("Mori not available, dispatch-based transfers disabled")
-
+import mori
+from mori.ops import EpDispatchCombineConfig, EpDispatchCombineOp
+from mori.ops import EpDispatchCombineKernelType
+from mori.ops import mori_shmem_init_attr
 
 @dataclass
 class DispatchTransferConfig:
@@ -45,12 +38,11 @@ _shmem_initialized: bool = False
 def _ensure_shmem_initialized(rank: int, world_size: int):
     """Initialize Mori shared memory (must be called once per process)."""
     global _shmem_initialized
-    if not _shmem_initialized and MORI_AVAILABLE:
+    if not _shmem_initialized:
         try:
-            print(f"Trying Mori shmem for rank {rank}/{world_size}", flush=True)
             mori_shmem_init_attr(rank, world_size)
             _shmem_initialized = True
-            print(f"Mori shmem initialized for rank {rank}/{world_size}", flush=True)
+            #print(f"Mori shmem initialized for rank {rank}/{world_size}", flush=True)
         except Exception as e:
             logger.error(f"Failed to initialize Mori shmem: {e}")
             raise
@@ -65,9 +57,6 @@ def get_dispatch_handle(config: DispatchTransferConfig) -> Any:
     - num_experts_per_token = 1 (each token goes to exactly one place)
     - This makes expert_id == target_rank for simple routing
     """
-    if not MORI_AVAILABLE:
-        raise RuntimeError("Mori not available for dispatch-based transfers")
-    
     key = (config.rank, config.world_size, config.hidden_dim, config.dtype)
     
     if key not in _dispatch_handles:
@@ -79,7 +68,7 @@ def get_dispatch_handle(config: DispatchTransferConfig) -> Any:
             EpDispatchCombineKernelType.IntraNode
         )
         
-        print(f"{config.rank} --------- get dispatch handle for {key}", flush=True)
+        print(f"{config.rank} new dispatch handle {key}", flush=True)
         mori_config = EpDispatchCombineConfig(
             data_type=config.dtype,
             rank=config.rank,
@@ -105,123 +94,6 @@ def get_dispatch_handle(config: DispatchTransferConfig) -> Any:
     
     return _dispatch_handles[key]
 
-
-def dispatch_send_recv(
-    data: jnp.ndarray,
-    target_rank: int,
-    dispatch_handle: Any,
-    my_rank: int,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Perform a dispatch-based send/recv operation.
-    
-    All ranks must call this simultaneously (collective operation).
-    
-    Args:
-        data: [num_tokens, hidden_dim] array to send
-        target_rank: Destination rank (0 to world_size-1), or -1 to not send
-        dispatch_handle: The EpDispatchCombineOp handle
-        my_rank: This process's rank
-    
-    Returns:
-        (received_data, num_received): Data received from other ranks
-    """
-    num_tokens = data.shape[0]
-    hidden_dim = data.shape[1] if data.ndim > 1 else data.shape[0]
-    
-    # Routing indices: expert_id == target_rank (with num_experts_per_rank=1)
-    if target_rank >= 0:
-        indices = jnp.full((num_tokens, 1), target_rank, dtype=jnp.int32)
-    else:
-        # Send to self (participate in collective but don't really send)
-        indices = jnp.full((num_tokens, 1), my_rank, dtype=jnp.int32)
-    
-    # Dummy weights/scales (not used for simple transfer)
-    dummy_weights = jnp.zeros((num_tokens, 1), dtype=jnp.float32)
-    dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
-    
-    # Call dispatch - ALL ranks must call this together
-    (out_data, out_weights, out_scales, out_indices, num_recv) = dispatch_handle.dispatch(
-        data, dummy_weights, dummy_scales, indices,
-        has_scales=False,
-        has_weights=False,
-        block_num=80,
-        warp_per_block=16,
-    )
-    
-    return out_data, num_recv
-
-
-def dispatch_transfer(
-    arrays: Sequence[jax.Array],
-    target_rank: int,
-    my_rank: int,
-    world_size: int,
-    dtype: jnp.dtype = jnp.bfloat16,
-) -> list[jax.Array]:
-    """
-    High-level dispatch-based transfer for multiple arrays.
-    
-    This is intended to replace send_or_recv from dime2.py.
-    All ranks must call this simultaneously.
-    
-    Args:
-        arrays: List of arrays to send
-        target_rank: Destination rank, or -1 if not sending
-        my_rank: This process's rank
-        world_size: Total number of ranks
-        dtype: Data type for dispatch config
-    
-    Returns:
-        List of received arrays (same shapes as input arrays)
-    """
-    if not arrays:
-        return []
-    
-    # Compute max hidden dim across all arrays
-    max_hidden_dim = max(arr.size for arr in arrays)
-    for arr in arrays:
-        print(f"{my_rank} arr size {arr.shape}")
-    
-    config = DispatchTransferConfig(
-        rank=my_rank,
-        world_size=world_size,
-        hidden_dim=max_hidden_dim,
-        dtype=dtype,
-    )
-    handle = get_dispatch_handle(config)
-    
-    results = []
-    for arr in arrays:
-        original_shape = arr.shape
-        original_dtype = arr.dtype
-        
-        # Flatten to [1, size] "token" format
-        flat_size = arr.size
-        token_data = arr.reshape(1, flat_size).astype(dtype)
-        
-        # Pad to hidden_dim if needed
-        if flat_size < max_hidden_dim:
-            padding = jnp.zeros((1, max_hidden_dim - flat_size), dtype=dtype)
-            token_data = jnp.concatenate([token_data, padding], axis=1)
-        
-        out_data, num_recv = dispatch_send_recv(
-            token_data, target_rank, handle, my_rank
-        )
-        
-        # Extract and reshape received data
-        if num_recv > 0:
-            received = out_data[0, :flat_size].reshape(original_shape)
-            received = received.astype(original_dtype)
-        else:
-            # No data received - return zeros or original
-            received = jnp.zeros(original_shape, dtype=original_dtype)
-        
-        results.append(received)
-    
-    return results
-
-
 def dispatch_transfer_collective(
     arrays: Sequence[jax.Array],
     target_rank: int,
@@ -229,9 +101,8 @@ def dispatch_transfer_collective(
     world_size: int,
     hidden_dim: int,
     is_sender: bool,
-    dtype: jnp.dtype = jnp.bfloat16,
-    shape_and_dtype: Optional[list[tuple]] = None,
-    is_observer: bool = False,
+    dtype: jnp.dtype,
+    shape_and_dtype: list[tuple],
 ) -> list[jax.Array]:
     """
     Collective dispatch-based transfer for pipeline parallel communication.
@@ -254,16 +125,10 @@ def dispatch_transfer_collective(
         List of received arrays (original arrays for sender, received data for receiver)
         Empty list for observers.
     """
-    if not MORI_AVAILABLE:
-        raise RuntimeError("Mori not available for dispatch-based transfers")
-    
-    # Use a consistent hidden_dim across all ranks
-    effective_hidden_dim = max(hidden_dim, 1)
-    
     config = DispatchTransferConfig(
         rank=my_rank,
         world_size=world_size,
-        hidden_dim=effective_hidden_dim,
+        hidden_dim=hidden_dim,
         dtype=dtype,
     )
     handle = get_dispatch_handle(config)
@@ -272,6 +137,12 @@ def dispatch_transfer_collective(
         # Sender: pack arrays into tokens and route to target
         results = []
         for arr in arrays:
+            
+            # DEBUG: Print what we're sending
+            # print(f"[rank {my_rank}] SEND to {target_rank}: "
+            #       f"shape={arr.shape} dtype={arr.dtype} "
+            #       f"first={arr.flatten()[0]} sum={float(arr.sum())}", flush=True)
+            
             original_shape = arr.shape
             original_dtype = arr.dtype
             flat_size = arr.size
@@ -280,8 +151,8 @@ def dispatch_transfer_collective(
             token_data = arr.reshape(1, flat_size).astype(dtype)
             
             # Pad to hidden_dim if needed
-            if flat_size < effective_hidden_dim:
-                padding = jnp.zeros((1, effective_hidden_dim - flat_size), dtype=dtype)
+            if flat_size < hidden_dim:
+                padding = jnp.zeros((1, hidden_dim - flat_size), dtype=dtype)
                 token_data = jnp.concatenate([token_data, padding], axis=1)
             
             # Route to target_rank
@@ -289,9 +160,6 @@ def dispatch_transfer_collective(
             dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
             dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
             
-            # print(f"flat size {flat_size} {original_dtype} / {dtype} token data {token_data.dtype}", flush=True)
-            
-            # Call dispatch
             # TODO we shall None when scales/weights are not given
             (out_data, _, _, _, num_recv) = handle.dispatch(
                 token_data, dummy_weights, dummy_scales, indices,
@@ -309,9 +177,10 @@ def dispatch_transfer_collective(
     
     else:
         # Receiver or observer: participate in collective
-        # Create dummy token to send to self (no-op)
-        dummy_token = jnp.zeros((1, effective_hidden_dim), dtype=dtype)
-        indices = jnp.array([[my_rank]], dtype=jnp.int32)  # Send to self
+        dummy_token = jnp.zeros((1, hidden_dim), dtype=dtype)
+        # dummy_token = jnp.full((1, hidden_dim), 777, dtype=dtype)
+
+        indices = jnp.array([[target_rank]], dtype=jnp.int32)  # Send to self
         dummy_weights = jnp.zeros((1, 1), dtype=jnp.float32)
         dummy_scales = jnp.zeros((1, 1), dtype=jnp.float32)
         
@@ -325,39 +194,26 @@ def dispatch_transfer_collective(
         )
         
         # IMPORTANT: Observer must return empty list (outvars=[])
-        if is_observer:
+        if my_rank == target_rank:
             return []
         
         # If we received data and have shape info, reshape appropriately
-        if num_recv > 0 and shape_and_dtype:
-            results = []
-            offset = 0
-            for shape, out_dtype in shape_and_dtype:
-                flat_size = int(np.prod(shape))
-                # Extract the data for this array
-                arr_data = out_data[0, offset:offset + flat_size]
-                arr_data = arr_data.reshape(shape).astype(out_dtype)
-                results.append(arr_data)
-                offset += flat_size
-            return results
-        elif num_recv > 0:
-            # Return raw received data if no shape info
-            return [out_data[:num_recv]]
-        else:
-            # No data received - return zeros with expected shapes
-            if shape_and_dtype:
-                return [
-                    jnp.zeros(shape, dtype=out_dtype) 
-                    for shape, out_dtype in shape_and_dtype
-                ]
-            return []
-
+        results = []
+        offset = 0
+        for shape, out_dtype in shape_and_dtype:
+            flat_size = int(np.prod(shape))
+            # Extract the data for this array
+            arr_data = out_data[0, offset:offset + flat_size]
+            arr_data = arr_data.reshape(shape).astype(out_dtype)
+            results.append(arr_data)
+            offset += flat_size
+        return results
 
 def cleanup_dispatch_handles():
     """Clean up all dispatch handles (call at program end)."""
     global _dispatch_handles, _shmem_initialized
     _dispatch_handles.clear()
-    if _shmem_initialized and MORI_AVAILABLE:
+    if _shmem_initialized:
         try:
             mori.shmem.shmem_finalize()
         except Exception as e:
