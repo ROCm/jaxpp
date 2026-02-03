@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -200,6 +200,25 @@ def get_named_sharding(a: jax.Array):
     return a.sharding
 
 
+class _Missing:
+    pass
+
+
+_missing = _Missing()
+
+
+def update_named_sharding(
+    s: jax.sharding.NamedSharding,
+    spec: jax.sharding.PartitionSpec | _Missing = _missing,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | _Missing = _missing,
+) -> jax.sharding.NamedSharding:
+    if isinstance(spec, _Missing):
+        spec = s.spec
+    if isinstance(mesh, _Missing):
+        mesh = s.mesh
+    return jax.sharding.NamedSharding(mesh, spec)
+
+
 def updated_named_sharding_mesh(
     shardings: Iterable[jax.sharding.NamedSharding | UnspecifiedValue | None], new_mesh
 ):
@@ -215,3 +234,33 @@ def updated_named_sharding_mesh(
             new_sharding = jax.sharding.NamedSharding(new_mesh, s.spec)
         res.append(new_sharding)
     return res
+
+
+@contextlib.contextmanager
+def print_memstats(label: str, enabled: bool = False):
+    if not enabled:
+        yield
+        return
+    print(f"\nBefore: {label}:")
+    for d in jax.local_devices():
+        stats = d.memory_stats()
+        used = stats["bytes_in_use"] / 2**30
+        limit = stats["bytes_limit"] / 2**30
+        peak_size = stats["peak_bytes_in_use"] / 2**30
+        print(
+            f"\tUsing (GB) {used:.2f} / {limit:.2f} ({used/limit:%}) ({peak_size=:.2f} GiB) on {d}",
+            flush=True,
+        )
+
+    yield
+
+    print(f"\nAfter: {label}:")
+    for d in jax.local_devices():
+        stats = d.memory_stats()
+        used = stats["bytes_in_use"] / 2**30
+        limit = stats["bytes_limit"] / 2**30
+        peak_size = stats["peak_bytes_in_use"] / 2**30
+        print(
+            f"\tUsing (GB) {used:.2f} / {limit:.2f} ({used/limit:%}) ({peak_size=:.2f} GiB) on {d}",
+            flush=True,
+        )

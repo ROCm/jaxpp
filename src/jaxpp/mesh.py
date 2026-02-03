@@ -21,9 +21,39 @@ from typing import ClassVar
 import jax
 import numpy as np
 
+from jaxpp import env_vars
+
 
 @dataclasses.dataclass(frozen=True)
 class MpmdMesh:
+    """A JAX mesh partitioned into MPMD (Multiple Program Multiple Data) groups.
+
+    MpmdMesh wraps a standard JAX mesh and designates one axis as the "MPMD axis".
+    The mesh is conceptually split into multiple independent groups along this axis,
+    where each group can execute different computations (e.g., pipeline stages).
+
+    For example, with a mesh of shape {'mpmd': 4, 'data': 2, 'model': 2} and
+    mpmd_axis_name='mpmd', the mesh is split into 4 MPMD groups, each containing
+    4 devices (2 data x 2 model). Each group runs its own computation, and arrays
+    can be distributed across one or more groups.
+
+    Key concepts:
+        - MPMD group: A slice of the mesh along the MPMD axis. Each group
+          has an index from 0 to mpmd_dim - 1.
+        - Submesh: A subset of MPMD groups combined into a single mesh.
+          Used when arrays are replicated across multiple groups.
+        - Lowering mesh: The mesh used for XLA compilation, which is the
+          local process's MPMD group mesh in multi-process settings.
+
+    In multi-process execution, each process belongs to exactly one MPMD group.
+    Arrays may be replicated across multiple groups when needed as inputs by
+    multiple pipeline stages (common for constants and loop invariants).
+
+    Attributes:
+        jax_mesh: The underlying JAX mesh containing all devices.
+        mpmd_axis_name: Name of the axis used to partition into MPMD groups.
+    """
+
     jax_mesh: jax.sharding.Mesh
     mpmd_axis_name: str
     mesh_stack: ClassVar[list["MpmdMesh"]] = []
@@ -42,21 +72,26 @@ class MpmdMesh:
         mpmd_idx_by_process = dict[int, int]()
         for d in self.jax_mesh._flat_devices_set:
             if (mpmd_idx := mpmd_idx_by_process.get(d.process_index)) is not None:
-                if self.device_coords[d][self.mpmd_axis] != mpmd_idx:
+                if self.device_mpmd_idx[d] != mpmd_idx:
                     raise AssertionError(
                         f"Process {d.process_index} found in two mpmd indices: "
                         f"{mpmd_idx} {self.device_coords[d][self.mpmd_axis]}"
                         f"{jax.local_devices()=} {self.device_coords}"
                     )
             else:
-                mpmd_idx_by_process[d.process_index] = self.device_coords[d][
-                    self.mpmd_axis
-                ]
+                mpmd_idx_by_process[d.process_index] = self.device_mpmd_idx[d]
 
     @cached_property
     def device_coords(self) -> Mapping[jax.Device, tuple[int, ...]]:
         return {
             device: coord for coord, device in np.ndenumerate(self.jax_mesh.devices)
+        }
+
+    @cached_property
+    def device_mpmd_idx(self) -> Mapping[jax.Device, int]:
+        return {
+            device: self.device_coords[device][self.mpmd_axis]
+            for device in self.jax_mesh.devices.flat
         }
 
     @cached_property
@@ -82,7 +117,10 @@ class MpmdMesh:
 
     @cached_property
     def my_mpmd_axis_index(self) -> int:
-        if not self.jax_mesh.is_multi_process:
+        if (
+            not env_vars.jaxpp_debug_force_mpmdify.value
+            and not self.jax_mesh.is_multi_process
+        ):
             raise ValueError(
                 "my_mpmd_axis_index is supported only in multi-process meshes"
             )

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,14 +17,16 @@ import itertools as it
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, NewType, TypeVar
+from typing import Any, NewType
 
 import jax
-from jax.sharding import NamedSharding
+from jax.sharding import NamedSharding, PartitionSpec
+
+from jaxpp.mesh import MpmdMesh
 
 PyTree = Any
 ArrayTree = jax.Array | Iterable["ArrayTree"] | Mapping[Any, "ArrayTree"]
-DistributedShardingPyTree = Any
+MpmdShardingPyTree = Any
 DLPackCapsule = Any
 
 
@@ -34,18 +36,32 @@ MpmdIdx = NewType("MpmdIdx", int)
 
 
 @dataclass(frozen=True)
-class DistributedSharding:
+class MpmdSharding:
+    mpmd_mesh: MpmdMesh
+    # NOTE: mesh_ids can be empty for unused arrays
+    # NOTE: It's always converted to a frozenset
     mesh_ids: set[int]
-    sharding: NamedSharding
+    spec: PartitionSpec
+
+    def __post_init__(self):
+        object.__setattr__(self, "mesh_ids", frozenset(self.mesh_ids))
+
+    @property
+    def sharding(self) -> NamedSharding:
+        """Construct a JAX NamedSharding spanning all MPMD groups in mesh_ids.
+        The returned sharding's mesh is a submesh of the full MPMD mesh,
+        containing only the devices from the specified MPMD group indices.
+        This is used for resharding between SPMD and MPMD array layouts.
+
+        Returns:
+            A NamedSharding with a mesh spanning all devices in mesh_ids
+            and the partition spec from this MpmdSharding.
+        """
+        mesh = self.mpmd_mesh.mpmd_submesh(list(self.mesh_ids)).jax_mesh
+        return NamedSharding(mesh, self.spec)
 
 
 UID = ScalarUid
-
-
-if TYPE_CHECKING:
-    from _typeshed import SupportsRichComparisonT
-else:
-    SupportsRichComparisonT = TypeVar("SupportsRichComparisonT")
 
 
 _global_uid = it.count()

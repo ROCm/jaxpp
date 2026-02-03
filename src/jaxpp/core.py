@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,6 +41,7 @@ import jax
 import jax._src.core as jcore
 import jax._src.util as ju
 import jax.interpreters.partial_eval as pe
+from jax._src import source_info_util
 from jax._src.ad_checkpoint import remat_p
 from jax._src.debugging import inspect_sharding_p
 
@@ -53,6 +54,7 @@ if jax.__version_info__ < (0, 7, 2):
 else:
     from jax._src.op_shardings import are_hlo_shardings_equal
 from jax._src.pjit import _infer_params, _parse_jit_arguments
+from jax._src.shard_map import shard_map_p
 from jax._src.tree_util import equality_errors_pytreedef
 from jax._src.util import weakref_lru_cache
 from jax.interpreters.ad import add_jaxvals_p as add_any_p
@@ -99,8 +101,8 @@ from jaxpp.mesh import MpmdMesh
 from jaxpp.pipelining import yield_scope
 from jaxpp.schedules import FusedTask, Task, mk_task_name, preprocess_schedule_tasks
 from jaxpp.types import (
-    DistributedSharding,
     MpmdIdx,
+    MpmdSharding,
     TaskType,
     fresh_scalar_uid,
 )
@@ -110,11 +112,6 @@ from jaxpp.utils import (
     log_elapsed_time,
     updated_named_sharding_mesh,
 )
-
-if jax.__version_info__ < (0, 6, 1):
-    from jax.experimental.shard_map import shard_map_p
-else:
-    from jax._src.shard_map import shard_map_p
 
 logger = logging.getLogger(__name__)
 
@@ -223,12 +220,7 @@ class AllReduceRewriteTrace(jcore.Trace, Generic[SubTrace]):
         self.parent_trace = parent_trace
 
     def new_arg(self, aval, mpmd_defs):
-        if jax.__version_info__ > (0, 6, 0):
-            from jax._src import source_info_util
-
-            val = self.parent_trace.new_arg(aval, source_info_util.current())
-        else:
-            val = self.parent_trace.new_arg(aval)
+        val = self.parent_trace.new_arg(aval, source_info_util.current())
         return AllReduceRewriteTracer(self, val, mpmd_defs)
 
     def call_parent(self, primitive, tracers, params, *, placement=None):
@@ -333,7 +325,7 @@ def propagate_and_rewrite_adds(
     ]
 
     with jcore.set_current_trace(mpmd_trace):
-        res = jcore.eval_jaxpr(jaxpr, (), *in_tracers, propagate_source_info=False)
+        res = jcore.eval_jaxpr(jaxpr, (), *in_tracers, propagate_source_info=True)
 
     additional_args = ()
     if jax.__version_info__ > (0, 6, 1):
@@ -1142,6 +1134,7 @@ def cluster_jaxpr(
         if rem != 0:
             raise AssertionError(
                 f"Expected even number of stages, {len(clusters)} found"
+                f"\n{clustered_jaxpr.pretty_print(use_color=False)}"
             )
     else:
         inferred_num_stages = len(clusters)
@@ -1417,7 +1410,7 @@ def get_one_loop_eqn_idx(
     loop_eqn_idxs = [idx for idx, e in enumerate(eqns) if e.primitive is dax_pscan_p]
     if len(loop_eqn_idxs) != 1:
         raise AssertionError(
-            "Expected 1 loop at the top level but {len(loop_eqn_idxs)} found."
+            f"Expected 1 loop at the top level but {len(loop_eqn_idxs)} found."
         )
     return loop_eqn_idxs[0]
 
@@ -1723,6 +1716,12 @@ def loop_placement_by_clusters(
 @unwrap_closed
 def loop_passes(jaxpr: jcore.Jaxpr) -> jcore.Jaxpr:
     if env_vars.jaxpp_enable_licm.value:
+        loop_eqn_idxs = [
+            idx for idx, e in enumerate(jaxpr.eqns) if e.primitive is dax_pscan_p
+        ]
+        if len(loop_eqn_idxs) == 0:
+            return jaxpr
+
         logger.info("Running LICM")
         jaxpr = hoist_and_cse_pscan_invariant_equations(jaxpr, cross_remat=True)
     check_jaxpr(jaxpr)
@@ -1925,7 +1924,7 @@ def infer_donation(
     last_use = last_used(tasked_jaxpr)
 
     invar_is_donated = dict(zip(tasked_jaxpr.invars, donated_invars))
-    received_vars = set[jcore.Var]()
+    undonateable_vars = set[jcore.Var]()
 
     least_donation = dict[tuple[int, TaskType], Sequence[bool]]()
     new_eqns = []
@@ -1936,8 +1935,8 @@ def infer_donation(
         donation = tuple(
             is_last_use_for_invar[invar_idx]
             and invar_is_donated.get(invar, True)
-            # NOTE: we avoid donating received invars
-            and invar not in received_vars
+            # NOTE: we avoid donating sent and received invars
+            and invar not in undonateable_vars
             for invar_idx, invar in enumerate(task_eqn.invars)
         )
 
@@ -1945,18 +1944,24 @@ def infer_donation(
             new_eqns.append(
                 task_eqn.replace(params=task_eqn.params | {"donate_invars": donation})
             )
-            if task_eqn.params[
-                "task_info"
-            ] is not None and donation <= least_donation.get(
-                task_eqn.params["task_info"], (True,) * len(donation)
-            ):
-                least_donation[task_eqn.params["task_info"]] = donation
+
+            task_info = task_eqn.params["task_info"]
+            if task_info is not None:
+                least_donation[task_info] = tuple(
+                    min(prev, curr)
+                    for prev, curr in zip(
+                        least_donation.get(task_info, (True,) * len(donation)),
+                        donation,
+                        strict=True,
+                    )
+                )
+
         elif task_eqn.primitive is transfer_p:
             # NOTE: we avoid donating received invars.
-            # Variables that are sent are not donated because
-            #  send_done (below) extends their lifetime to the end of
-            # the program
-            received_vars.update(task_eqn.outvars)
+            # FIXME(#44): sent invars could be donated however jax_primitives.py impls
+            #  keep scoped holds on sent invars
+            undonateable_vars.update(task_eqn.invars)
+            undonateable_vars.update(task_eqn.outvars)
             new_eqns.append(task_eqn)
         elif task_eqn.primitive is add_multi_p:
             new_eqns.append(
@@ -1971,8 +1976,7 @@ def infer_donation(
     #  microbatches will have the same `task_info`.
     #  Here, we set the donation to the least donation among all of the task's
     #  instantiations to minimize the compilation misses
-    minimize_compilation_misses = True
-    if minimize_compilation_misses:
+    if env_vars.jaxpp_share_donation.value:
         res = []
         for eqn in new_eqns:
             if eqn.primitive is task_p and eqn.params["task_info"] is not None:
@@ -2624,11 +2628,10 @@ def deduplicate_outvars(
     outvar_def = []
     replicas = [0]
     new_result_paths = []
-    for outvar, name_in_mpmd_idx, rpath in zip(
-        jaxpr.outvars,
-        defined_in_mpmd_idx_as,
-        jaxpr.debug_info.result_paths,
-        strict=True,
+    result_paths = jaxpr.debug_info.result_paths
+
+    for i, (outvar, name_in_mpmd_idx) in enumerate(
+        zip(jaxpr.outvars, defined_in_mpmd_idx_as, strict=True)
     ):
         if isinstance(outvar, jcore.Literal):
             raise NotImplementedError()
@@ -2638,12 +2641,17 @@ def deduplicate_outvars(
 
         outvar_def.extend(mpmd_idxs)
         copy_outvars.extend(vs)
-        new_result_paths.extend([rpath] * len(mpmd_idxs))
+
+        if result_paths is not None:
+            new_result_paths.extend([result_paths[i]] * len(mpmd_idxs))
+
         replicas.append(len(copy_outvars))
 
     return jaxpr.replace(
         outvars=copy_outvars,
-        debug_info=jaxpr.debug_info._replace(result_paths=tuple(new_result_paths)),
+        debug_info=jaxpr.debug_info._replace(
+            result_paths=tuple(new_result_paths) if result_paths is not None else None
+        ),
     ), MpmdDefs(outvar_def, replicas)
 
 
@@ -3280,6 +3288,21 @@ class ScalarMpmdFunction:
         stripped = strip_inspect_sharding_eqns(self.local_jaxpr)
         return jcore.jaxpr_as_fun(stripped)
 
+    @cached_property
+    def in_shardings(self):
+        res = jax.tree_util.tree_unflatten(
+            self.in_info.in_tree,
+            [
+                MpmdSharding(self.mpmd_mesh, mpmd_idxs, sharding.spec)
+                for mpmd_idxs, sharding in zip(
+                    self.in_info.in_mpmd_defs,
+                    self.in_info.in_shardings,
+                    strict=True,
+                )
+            ][len(self.consts) :],
+        )
+        return res
+
     def _maybe_shard_inputs(self, flat_args: list[jax.Array]):
         local_args = []
         for arg_idx, (arg, mpmd_idxs) in enumerate(
@@ -3348,11 +3371,15 @@ class ScalarMpmdFunction:
         results = []
         local_idx = 0
         for global_idx, mpmd_idxs in enumerate(self.in_info.out_mpmd_defs):
+            mpmd_sharding = MpmdSharding(
+                self.mpmd_mesh,
+                mpmd_idxs,
+                self.in_info.out_shardings[global_idx].spec,
+            )
             if self.mpmd_mesh.my_mpmd_axis_index in mpmd_idxs:
                 out = MpmdArray(
                     partially_addressable_arrays=[outs[local_idx]],
-                    mpmd_mesh=self.mpmd_mesh,
-                    mpmd_idxs=frozenset(mpmd_idxs),
+                    mpmd_sharding=mpmd_sharding,
                 )
                 expected_aval = self.in_info.out_avals[global_idx]
                 assert expected_aval.shape == out.aval.shape and (
@@ -3363,10 +3390,8 @@ class ScalarMpmdFunction:
                 aval = self.in_info.out_avals[global_idx]
                 out = MpmdArray(
                     partially_addressable_arrays=[],
-                    mpmd_mesh=self.mpmd_mesh,
-                    mpmd_idxs=frozenset(mpmd_idxs),
+                    mpmd_sharding=mpmd_sharding,
                     shape=aval.shape,
-                    spec=self.in_info.out_shardings[global_idx].spec,
                     dtype=aval.dtype,
                 )
             results.append(out)
@@ -3518,7 +3543,7 @@ class GlobalMpmdFunction:
         res = jax.tree_util.tree_unflatten(
             self.in_info.in_tree,
             [
-                DistributedSharding(mpmd_idxs, sharding)
+                MpmdSharding(self.mpmd_mesh, mpmd_idxs, sharding.spec)
                 for mpmd_idxs, sharding in zip(
                     self.in_info.in_mpmd_defs,
                     self.in_info.in_shardings,
@@ -3573,8 +3598,11 @@ class GlobalMpmdFunction:
                     #   "deduplicate" jaxpr's invars in fixup_multidefs
                     flat_args[i] = MpmdArray(
                         values.values(),
-                        mpmd_mesh=self.mpmd_mesh,
-                        mpmd_idxs=frozenset(expected_mpmd_idx),
+                        mpmd_sharding=MpmdSharding(
+                            self.mpmd_mesh,
+                            expected_mpmd_idx,
+                            self.in_info.in_shardings[i].spec,
+                        ),
                     )
             elif isinstance(arg, MpmdArray):
                 assert set(arg._mpmd_idxs) == expected_mpmd_idx
@@ -3589,12 +3617,15 @@ class GlobalMpmdFunction:
 
         i = 0
         actual_outputs = list[MpmdArray]()
-        for out_mpmd_def in self.in_info.out_mpmd_defs:
+        for out_idx, out_mpmd_def in enumerate(self.in_info.out_mpmd_defs):
             actual_outputs.append(
                 MpmdArray(
                     outputs[i : i + len(out_mpmd_def)],
-                    mpmd_mesh=self.mpmd_mesh,
-                    mpmd_idxs=frozenset(out_mpmd_def),
+                    mpmd_sharding=MpmdSharding(
+                        self.mpmd_mesh,
+                        out_mpmd_def,
+                        self.in_info.out_shardings[out_idx].spec,
+                    ),
                 )
             )
             i += len(out_mpmd_def)
@@ -3621,7 +3652,10 @@ class GlobalMpmdFunction:
         )
         dump_jaxpr(with_transfers, name=f"{self.name}.global", ctx=pp_ctx)
 
-        if not self.mpmd_mesh.jax_mesh.is_multi_process:
+        if (
+            not env_vars.jaxpp_debug_force_mpmdify.value
+            and not self.mpmd_mesh.jax_mesh.is_multi_process
+        ):
             with_transfers = bind_meshes(with_transfers, self.mpmd_mesh)
             # jaxprs = scalarize(with_transfers, self.mpmd_mesh)
             return dataclasses.replace(
@@ -3667,9 +3701,12 @@ def _mpmd_jit(
     static_argnames: str | Iterable[str] | None = None,
     donate_argnums: int | Sequence[int] | None = None,
     donate_argnames: str | Iterable[str] | None = None,
-    abstracted_axes: Any | None = None,
     compiler_options: dict[str, Any] | None = None,
 ) -> TraceableFunction:
+    add_kwargs = {}
+    if jax.__version_info__ <= (0, 8, 1):
+        add_kwargs = {"abstracted_axes": None}
+
     pjit_info = _parse_jit_arguments(
         fun=fun,
         in_shardings=in_shardings,
@@ -3680,11 +3717,11 @@ def _mpmd_jit(
         static_argnames=static_argnames,
         device=None,
         backend=None,
-        abstracted_axes=abstracted_axes,
         keep_unused=True,
         inline=False,
         compiler_options=compiler_options,
         use_resource_env=True,  # FIXME
+        **add_kwargs,
     )
     return TraceableFunction(
         fun=fun, mpmd_mesh=mpmd_mesh, pjit_info=pjit_info, strategy=strategy
@@ -3703,7 +3740,6 @@ def mpmd_jit_with_loop(
     static_argnames: str | Iterable[str] | None = None,
     donate_argnums: int | Sequence[int] | None = None,
     donate_argnames: str | Iterable[str] | None = None,
-    abstracted_axes: Any | None = None,
     compiler_options: dict[str, Any] | None = None,
 ) -> TraceableFunction:
     if in_specs is not None and in_shardings is not None:
@@ -3722,7 +3758,6 @@ def mpmd_jit_with_loop(
         static_argnames=static_argnames,
         donate_argnums=donate_argnums,
         donate_argnames=donate_argnames,
-        abstracted_axes=abstracted_axes,
         compiler_options=compiler_options,
     )
 
@@ -3738,7 +3773,6 @@ def mpmd_jit_by_yield(
     static_argnames: str | Iterable[str] | None = None,
     donate_argnums: int | Sequence[int] | None = None,
     donate_argnames: str | Iterable[str] | None = None,
-    abstracted_axes: Any | None = None,
     compiler_options: dict[str, Any] | None = None,
 ):
     return _mpmd_jit(
@@ -3751,7 +3785,6 @@ def mpmd_jit_by_yield(
         static_argnames=static_argnames,
         donate_argnums=donate_argnums,
         donate_argnames=donate_argnames,
-        abstracted_axes=abstracted_axes,
         compiler_options=compiler_options,
     )
 
@@ -3767,7 +3800,6 @@ def mpmd_jit_rev(
     static_argnames: str | Iterable[str] | None = None,
     donate_argnums: int | Sequence[int] | None = None,
     donate_argnames: str | Iterable[str] | None = None,
-    abstracted_axes: Any | None = None,
     compiler_options: dict[str, Any] | None = None,
 ) -> TraceableFunction:
     return _mpmd_jit(
@@ -3780,6 +3812,5 @@ def mpmd_jit_rev(
         static_argnames=static_argnames,
         donate_argnums=donate_argnums,
         donate_argnames=donate_argnames,
-        abstracted_axes=abstracted_axes,
         compiler_options=compiler_options,
     )
