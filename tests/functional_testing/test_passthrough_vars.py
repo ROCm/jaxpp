@@ -79,6 +79,7 @@ class FlaxModelWithPassthroughExecutionTest(unittest.TestCase):
     def setUp(self):
         """Set up a basic environment before each test with 8 GPU devices."""
         xb.get_backend.cache_clear()
+        gpu_devices = jax.devices('gpu')
 
         if len(gpu_devices) < 1:
             # Skip the test if no GPU are available
