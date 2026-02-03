@@ -15,6 +15,7 @@
 
 import ctypes
 import unittest
+import pytest
 
 import jax.numpy as jnp
 import ml_dtypes
@@ -24,24 +25,48 @@ from parameterized import parameterized
 
 from jaxpp.dlpack import capsule_name, dlpack_nccl_args
 
-_libcudart = ctypes.CDLL("libcudart.so")
-_libcudart.cudaMemcpy.argtypes = [
+_GPU_RUNTIME_CANDIDATES = (
+    ("libcudart.so", "cudaMemcpy"),
+    ("libamdhip64.so", "hipMemcpy"),
+)
+
+
+def _load_gpu_runtime():
+    for library_name, memcpy_name in _GPU_RUNTIME_CANDIDATES:
+        try:
+            library = ctypes.CDLL(library_name)
+        except OSError:
+            continue
+        try:
+            memcpy_fn = getattr(library, memcpy_name)
+        except AttributeError:
+            continue
+        return library_name, memcpy_name, memcpy_fn
+    return None, None, None
+
+
+_library_name, _memcpy_name, _memcpy = _load_gpu_runtime()
+if _memcpy is None:
+    pytest.skip(
+        "No CUDA/ROCm runtime found (libcudart.so or libamdhip64.so required)",
+        allow_module_level=True,
+    )
+
+_memcpy.argtypes = [
     ctypes.c_void_p,  # dst
     ctypes.c_void_p,  # src
     ctypes.c_size_t,  # count (bytes)
     ctypes.c_int,  # kind
 ]
-_libcudart.cudaMemcpy.restype = ctypes.c_int
-_cudaMemcpyDeviceToHost = 2
+_memcpy.restype = ctypes.c_int
+_MemcpyDeviceToHost = 2
 
 
-def cuda_memcpy_to_host(device_ptr: int, num_bytes: int) -> bytes:
+def gpu_memcpy_to_host(device_ptr: int, num_bytes: int) -> bytes:
     host_buffer = (ctypes.c_uint8 * num_bytes)()
-    err = _libcudart.cudaMemcpy(
-        host_buffer, device_ptr, num_bytes, _cudaMemcpyDeviceToHost
-    )
+    err = _memcpy(host_buffer, device_ptr, num_bytes, _MemcpyDeviceToHost)
     if err != 0:
-        raise RuntimeError(f"cudaMemcpy failed with error {err}")
+        raise RuntimeError(f"{_memcpy_name} failed with error {err}")
     return bytes(host_buffer)
 
 
@@ -63,7 +88,7 @@ class TestDlpackExport(unittest.TestCase):
         self.assertEqual(count, 3)
 
         itemsize = np.dtype(np_dtype).itemsize
-        raw_bytes = cuda_memcpy_to_host(data_ptr, count * itemsize)
+        raw_bytes = gpu_memcpy_to_host(data_ptr, count * itemsize)
         values = np.frombuffer(raw_bytes, dtype=np_dtype)
 
         np.testing.assert_array_equal(values, np.array([1, 2, 3], dtype=np_dtype))
