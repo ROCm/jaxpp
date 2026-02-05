@@ -1,0 +1,4 @@
+[submodule "third_party/mori"]
+	path = third_party/mori
+	url = https://github.com/ROCm/mori
+	branch = pemeliya/jax_integration

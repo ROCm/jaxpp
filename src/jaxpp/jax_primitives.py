@@ -37,8 +37,10 @@ from jaxpp.types import MpmdSharding
 from jaxpp.types import TaskType
 from jaxpp.utils import get_named_sharding, print_memstats, updated_named_sharding_mesh
 
-logger = logging.getLogger(__name__)
+from jaxpp.dispatch_comm import dispatch_transfer_collective
+import jax.numpy as jnp
 
+logger = logging.getLogger(__name__)
 add_multi_p = jcore.Primitive("add_multi")
 
 
@@ -178,6 +180,80 @@ def transfer_impl(*args, src_mpmd_idx, tgt_mpmd_idx, src_shardings):
     return res
 
 
+# Dispatch-based transfer primitive (alternative to send/recv using Mori dispatch)
+dispatch_transfer_p = jcore.Primitive("dispatch_transfer")
+dispatch_transfer_p.multiple_results = True
+
+
+@dispatch_transfer_p.def_abstract_eval
+def dispatch_transfer_abstract_eval(
+    *args,
+    my_idx: int,
+    remote_idx: int,  # to whom we send or from whom we receive
+    world_size: int,
+    is_sender: bool,
+    shape_and_dtype,
+):
+    """
+    Abstract eval for dispatch-based transfer.
+    
+    When is_sender=True: inputs are the data to send, outputs are dropped
+    When is_sender=False: inputs may be empty, outputs are the received data
+    """
+    if is_sender:
+        # Sender: outputs are dropped (same as inputs for abstract eval)
+        return args
+    else:
+        # Receiver: outputs have shapes specified by shape_and_dtype
+        return tuple(
+                jcore.ShapedArray(shape, dtype) 
+                for shape, dtype in shape_and_dtype
+        )
+
+
+@dispatch_transfer_p.def_impl
+def dispatch_transfer_impl(
+    *args,
+    my_idx: int,
+    remote_idx: int,  # to whom we send or from whom we receive
+    world_size: int,
+    is_sender: bool,
+    shape_and_dtype,
+):
+    """
+    Implementation of dispatch-based transfer.
+    
+    All ranks must call this simultaneously (it's a collective).
+    Uses Mori's dispatch operation under the hood.
+    
+    NOTE: This is a "degenerate" use of dispatch where:
+    - num_experts_per_rank = 1 (one target per stage)
+    - num_experts_per_token = 1 (each token goes to exactly one place)
+    - expert_id == target_rank for simple routing
+    
+    The dispatch call is collective - all ranks call it together.
+    Sender provides data + routing indices, receiver gets data routed to it.
+    """
+    # Perform the dispatch-based collective transfer
+    results = dispatch_transfer_collective(
+        arrays=list(args) if args else [],
+        my_rank=my_idx,
+        target_rank=remote_idx,
+        world_size=world_size,
+        is_sender=is_sender,
+        shape_and_dtype=shape_and_dtype,
+    )
+    
+    # DEBUG: Print received data for receivers
+    # if not is_sender and my_idx != remote_idx:
+    #     for i, r in enumerate(results):
+    #         print(f"[rank {my_idx}] DISPATCH_RECV[{i}]: "
+    #               f"shape={r.shape} dtype={r.dtype} "
+    #               f"first={r.flatten()[0]} sum={r.sum()}", flush=True)
+    
+    return tuple(results) if results else ()
+
+
 delete_p = jcore.Primitive("delete")
 # NOTE: we have delete equations for donated buffers as well
 #  which fail if Jax tries to canonicalize them.
@@ -266,6 +342,16 @@ def send_impl(*arrs, id, shardings):
             #  finish before the arrays is deleted.
             pass
         a._wait_send_finish = _wait_send_finish
+        
+    ss=""
+    for a, tgt, aremote in zip(arrs, tgt_mpmd_idxs, receiver_shardings):
+        tgt_dev = aremote._device_assignment[0].process_index
+        # tgt_dev == tgt
+        if a.ndim == 0:
+            ss += f"scalar {a} --> {tgt}"
+        else:
+            ss += f"{a.shape} --> {tgt}"
+    # print(f"++++++ send {ss}")
     return arrs
 
 
