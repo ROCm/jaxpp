@@ -265,11 +265,11 @@ def run_spmd_dp(args, dp_step, opt_state_base, params_base, x, dtype, num_device
 
         t0 = time.perf_counter()
         opt_state_repl, params_repl, losses, _ = dp_step(opt_state_repl, params_repl, x)
-        jax.block_until_ready(losses)
         t1 = time.perf_counter()
         times.append(t1 - t0)
 
         if step == PROFILE_STOP_STEP:
+            jax.tree_util.tree_map(lambda x: x.block_until_ready(), (opt_state_repl, params_repl, losses))
             print(f"{datetime.datetime.now()}: stop profile (spmd_dp)")
             jax.profiler.stop_trace()
 
@@ -311,11 +311,11 @@ def run_jaxpp(args, pp_step, opt_state_pp, params_pp, x, dtype):
 
         t0 = time.perf_counter()
         opt_state_pp, params_pp, losses, _ = pp_step(opt_state_pp, params_pp, x)
-        jax.block_until_ready(losses)
         t1 = time.perf_counter()
         times.append(t1 - t0)
 
         if step == PROFILE_STOP_STEP:
+            jax.tree_util.tree_map(lambda x: x.block_until_ready(), (opt_state_pp, params_pp, losses))
             print(f"{datetime.datetime.now()}: stop profile (jaxpp)")
             jax.profiler.stop_trace()
 
