@@ -35,6 +35,7 @@ cleanup() {
   echo "Cleaning up..."
   for pid in "${PIDS[@]}"; do
     kill -9 -- -"$pid" 2>/dev/null || true
+
   done
 }
 
