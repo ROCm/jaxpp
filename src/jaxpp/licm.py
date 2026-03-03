@@ -21,13 +21,12 @@ from collections.abc import Callable
 from typing import Any, Iterable, Mapping, Sequence, TypeVar
 
 import jax
-import jax._src.core as jcore
-import jax._src.util as ju
+import jax.extend.source_info_util as jsiu
 import jax.interpreters.partial_eval as pe
 import jax.numpy as jnp
-from jax._src import source_info_util
-from jax._src.ad_checkpoint import remat_p
 
+from jaxpp import jax_compat as jc
+from jaxpp.jax_compat import core as jcore
 from jaxpp.jax_primitives import dax_pscan_p
 from jaxpp.jaxpr_utils import eqns_free_vars, nonlit, substitute, var_is_duplicate
 from jaxpp.jaxpr_utils import gensym as mk_gensym
@@ -49,40 +48,6 @@ def hashable_params(params: dict[str, Any], exclude: set[str] | None = None):
     return tuple((k, freeze_if_set(v)) for k, v in params.items() if k not in exclude)
 
 
-def schedule(
-    vs: Iterable[jcore.Var],
-    mut_defns: dict[jcore.Var, jcore.JaxprEqn],
-    /,
-    *,
-    is_defined: Callable[[jcore.Var], bool],
-) -> tuple[list[jcore.JaxprEqn], set[jcore.Var]]:
-    now_defined = set[jcore.Var]()
-
-    res = list[jcore.JaxprEqn]()
-    stack = list(reversed(list(vs)))
-    while len(stack) > 0:
-        if stack[-1] in now_defined:
-            stack.pop()
-            continue
-
-        defn_eqn = mut_defns[stack[-1]]
-        not_visited = []
-        for invar in nonlit(defn_eqn.invars):
-            if invar in mut_defns:
-                if invar not in now_defined:
-                    not_visited.append(invar)
-            else:
-                assert is_defined(invar)
-
-        if len(not_visited) > 0:
-            stack.extend(not_visited)
-        else:
-            res.append(defn_eqn)
-            now_defined.update(defn_eqn.outvars)
-
-    return res, now_defined
-
-
 class PartialValue(enum.Enum):
     UNKNOWN = 0
     TRIVIALLY_KNOWN = 1
@@ -101,27 +66,11 @@ def partial_eval_eqns(
 ) -> tuple[list[jcore.JaxprEqn], list[jcore.JaxprEqn]]:
     known_eqns = []
     unknown_eqns = []
-
-    trivially_known_defns = dict[jcore.Var, jcore.JaxprEqn]()
-
-    def maybe_define_triv_known(
-        v: jcore.Var, as_: PartialValue, into: list[jcore.JaxprEqn]
-    ) -> None:
-        if v in trivially_known_defns:
-            assert env[v] == PartialValue.TRIVIALLY_KNOWN
-            eqns, defined_vars = schedule(
-                (v,), trivially_known_defns, is_defined=env.__contains__
-            )
-            # NOTE: we don't replicate trivial definitions although we could
-            ju.safe_map(trivially_known_defns.pop, defined_vars)
-
-            into.extend(eqns)
-            for dvar in defined_vars:
-                if (ex := env.get(dvar)) is not None:
-                    assert ex == PartialValue.TRIVIALLY_KNOWN
-                env[dvar] = as_
+    remaining_eqns = []
 
     custom_rules = partial_eval_custom_rules.value
+    eqns_to_results = dict[jcore.JaxprEqn, list[tuple[PartialValue, jcore.JaxprEqn]]]()
+    # Propagate partial value information through the equations.
     for eqn in eqns:
         in_vals = [
             env[invar] if isinstance(invar, jcore.Var) else PartialValue.TRIVIALLY_KNOWN
@@ -130,36 +79,48 @@ def partial_eval_eqns(
 
         rule = custom_rules.get(eqn.primitive, pe_rule_default)
         results = rule(eqn, in_vals)
+        eqns_to_results[eqn] = results
 
         for ty, e in results:
-            if ty == PartialValue.TRIVIALLY_KNOWN:
-                for outvar in e.outvars:
-                    trivially_known_defns[outvar] = e
-                    env[outvar] = PartialValue.TRIVIALLY_KNOWN
-            else:
-                into = {
-                    PartialValue.KNOWN: known_eqns,
-                    PartialValue.UNKNOWN: unknown_eqns,
-                }[ty]
+            env.update(zip(e.outvars, it.repeat(ty)))
 
-                # FIXME: currently if a TRIVIALLY_KNOWN var is used by both
-                #  a KNOWN equation and an UNKOWN equation then that var is
-                #  defined as KNOWN or UNKOWN depending on which use comes first.
-                #  It would be better that if the first use is UNKOWN we further
-                #  delay its definition and if another use is KNOWN then we schedule
-                #  this delayed equation as KNOWN.
+    # Resolve TRIVIALLY_KNOWN to either KNOWN or UNKNOWN.
+    for eqn in reversed(eqns):
+        results = eqns_to_results[eqn]
+
+        # Ignore ty from results intentionally as we want to propagate the partial value type
+        # of the outvars for the equation to the invars.
+        for _, e in results:
+            ty = env[e.outvars[0]]
+            assert all(
+                env[outvar] == ty for outvar in e.outvars
+            ), "Equation outvars have different partial value types"
+            if ty == PartialValue.UNKNOWN:
+                # UNKNOWN equations can have KNOWN invars and UNKNOWN invars.
+                for invar in [
+                    v
+                    for v in e.invars
+                    if isinstance(v, jcore.Var) and env[v] is not PartialValue.KNOWN
+                ]:
+                    env[invar] = PartialValue.UNKNOWN
+            elif ty == PartialValue.KNOWN:
+                # KNOWN equations can have only KNOWN invars.
                 for invar in nonlit(e.invars):
-                    if env[invar] == PartialValue.TRIVIALLY_KNOWN:
-                        maybe_define_triv_known(invar, as_=ty, into=into)
+                    env[invar] = PartialValue.KNOWN
 
-                into.append(e)
-                env.update(zip(e.outvars, it.repeat(ty)))
+    for eqn in eqns:
+        ty = env[eqn.outvars[0]]
+        into = {
+            PartialValue.KNOWN: known_eqns,
+            PartialValue.UNKNOWN: unknown_eqns,
+            PartialValue.TRIVIALLY_KNOWN: remaining_eqns,
+        }[ty]
+        into.append(eqn)
 
-    while len(trivially_known_defns) > 0:
-        maybe_define_triv_known(
-            next(iter(trivially_known_defns)), as_=PartialValue.KNOWN, into=known_eqns
-        )
+    assert len(known_eqns) + len(unknown_eqns) + len(remaining_eqns) == len(eqns)
 
+    # The eqns in remaining_eqns are not used by any other equation,
+    # so we can safely ignore them.
     return known_eqns, unknown_eqns
 
 
@@ -269,7 +230,7 @@ def inline_jaxpr(
     existing ones in such calling context.
     """
     assert len(results) == len(set(results))
-    jaxpr = pe.convert_constvars_jaxpr(jaxpr)
+    jaxpr = jc.convert_constvars_jaxpr(jaxpr)
 
     jaxpr_invars = {v: idx for idx, v in enumerate(jaxpr.invars)}
 
@@ -338,7 +299,7 @@ def partial_eval_jaxpr(
     if memory_scarce:
         new_known_eqns = list[jcore.JaxprEqn]()
         for eqn in known_eqns:
-            if eqn.primitive is remat_p:
+            if eqn.primitive is jc.remat_p:
                 j: jcore.Jaxpr = eqn.params["jaxpr"]
                 eqns = inline_jaxpr(j, j.constvars, eqn.invars, results=eqn.outvars)
                 new_known_eqns.extend(eqns)
@@ -401,7 +362,7 @@ def make_unzipped_jaxprs(
             if v not in known_vars:
                 raise AssertionError()
     check_known_invars()
-    _, known_jaxpr_invars = ju.partition_list(tuple(known_invars), jaxpr.invars)
+    _, known_jaxpr_invars = jc.partition_list(tuple(known_invars), jaxpr.invars)
     # fmt: on
 
     # Some of the original invars might be used by both the
@@ -509,8 +470,8 @@ def make_unzipped_application(
     gensym = mk_gensym()
     residual_outvars = [gensym(aval) for aval in residual_avals]
 
-    _, known_invars = ju.partition_list(in_known, eqn.invars)
-    known_outvars, unknown_outvars = ju.partition_list(out_is_unknown, eqn.outvars)
+    _, known_invars = jc.partition_list(in_known, eqn.invars)
+    known_outvars, unknown_outvars = jc.partition_list(out_is_unknown, eqn.outvars)
 
     known_eqn = eqn.replace(
         params={**eqn.params, "jaxpr": known_jaxpr},
@@ -570,7 +531,7 @@ def partial_eval_loop(
 
     rules = {jax.lax.convert_element_type_p: pe_rule_convert}
     if cross_remat:
-        rules[remat_p] = pe_rule_remat
+        rules[jc.remat_p] = pe_rule_remat
 
     with partial_eval_custom_rules.set(to=rules):
         (known_jaxpr, unknown_jaxpr, unknown_in_idx, out_is_unknown, res_avals) = (
@@ -599,13 +560,13 @@ def partial_eval_loop(
     )
 
 
-class CommonSubexpressionEliminationTrace(pe.DynamicJaxprTrace):
+class CommonSubexpressionEliminationTrace(jc.DynamicJaxprTrace):
     def __init__(self, debug_info, cross_remat: bool):
         super().__init__(debug_info)
         self.cross_remat = cross_remat
         self.equation_recipe_to_tracers_cache = dict[
             tuple[jcore.Primitive, Sequence[int], Any],
-            Sequence[pe.DynamicJaxprTracer] | pe.DynamicJaxprTracer,
+            Sequence[jc.DynamicJaxprTracer] | jc.DynamicJaxprTracer,
         ]()
 
     def default_process_primitive(self, primitive, tracers, params, source_info=None):
@@ -657,15 +618,12 @@ def hoist_and_cse_pscan_invariant_equations(
         out_tracers = jcore.eval_jaxpr(
             jaxpr,
             (),
-            *(
-                trace.new_arg(a.aval, source_info=source_info_util.current())
-                for a in jaxpr.invars
-            ),
+            *(trace.new_arg(a.aval, source_info=jsiu.current()) for a in jaxpr.invars),
         )
 
     additional_args = ()
     if jax.__version_info__ > (0, 6, 1):
-        source_info = source_info_util.current()
+        source_info = jsiu.current()
         additional_args = (source_info,)
         if jax.__version_info__ >= (0, 8, 0):
             out_tracers = [trace.to_jaxpr_tracer(t, source_info) for t in out_tracers]
@@ -688,7 +646,7 @@ def remove_duplicate_consts_invars(jaxpr: jcore.Jaxpr):
         duplicate_idx[loop_eqn.params["n_consts"] :]
     ), "Unexpected duplicate in loop carried state"
 
-    kept_invars, duplicate_invars = ju.partition_list(
+    kept_invars, duplicate_invars = jc.partition_list(
         [_ is not None for _ in duplicate_idx], loop_eqn.invars
     )
     new_loop_eqn = loop_eqn.replace(
